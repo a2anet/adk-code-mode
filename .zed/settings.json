@@ -1,0 +1,17 @@
+{
+    "format_on_save": "on",
+    "formatter": "auto",
+    "tab_size": 4,
+    "preferred_line_length": 100,
+    "languages": {
+        "Python": {
+            "format_on_save": "on",
+            "formatter": {
+                "external": {
+                    "command": ".venv/bin/ruff",
+                    "arguments": ["format", "--stdin-filename", "{buffer_path}"]
+                }
+            }
+        }
+    }
+}

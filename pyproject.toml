@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adk-code-mode"
+dynamic = ["version"]
+description = "A \"Code Mode\" Code Executor for ADK for agents to interact with tools, files, and custom packages with Python"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+keywords = ["adk", "code-mode", "code-executor", "agents", "a2a"]
+authors = [
+  { name = "A2A Net", email = "hello@a2anet.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.14.9",
+]
+
+[project.urls]
+Documentation = "https://github.com/A2ANet/adk-code-mode#readme"
+Issues = "https://github.com/A2ANet/adk-code-mode/issues"
+Source = "https://github.com/A2ANet/adk-code-mode"
+
+[tool.hatch.version]
+path = "src/adk_code_mode/__about__.py"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "if __name__ == .__main__.:"]

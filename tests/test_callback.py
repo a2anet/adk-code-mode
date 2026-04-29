@@ -11,7 +11,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.genai import types as genai_types
 
 from adk_code_mode import code_mode_before_model_callback
-from adk_code_mode.executor import CodeModeExecutor
+from adk_code_mode.executor import CodeModeCodeExecutor
 from adk_code_mode.tools import normaliser
 from tests._fake_runtime import FakeRuntime
 
@@ -43,8 +43,8 @@ class _FakeContext:
         self.invocation_id = invocation_id
 
 
-def _make_executor(tools: list[BaseTool], **kwargs: Any) -> CodeModeExecutor:
-    return CodeModeExecutor(tools=tools, runtime=FakeRuntime(), **kwargs)
+def _make_executor(tools: list[BaseTool], **kwargs: Any) -> CodeModeCodeExecutor:
+    return CodeModeCodeExecutor(tools=tools, runtime=FakeRuntime(), **kwargs)
 
 
 @pytest.mark.asyncio

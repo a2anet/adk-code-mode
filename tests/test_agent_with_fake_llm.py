@@ -26,7 +26,7 @@ from google.genai import types as genai_types
 
 from adk_code_mode import (
     CODE_MODE_SYSTEM_INSTRUCTION,
-    CodeModeExecutor,
+    CodeModeCodeExecutor,
     code_mode_before_model_callback,
 )
 
@@ -94,7 +94,7 @@ def _build_runner(
     code_block: str,
     final_text: str,
 ) -> tuple[Runner, str, str]:
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[_EchoTool()],
         runtime=FakeRuntime(),
         max_output_chars=10_000,

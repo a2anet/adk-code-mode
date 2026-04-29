@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025-present A2A Net <hello@a2anet.com>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""``CodeModeExecutor`` — the user-facing ``BaseCodeExecutor`` implementation.
+"""``CodeModeCodeExecutor`` — the user-facing ``BaseCodeExecutor`` implementation.
 
 Wires together the normaliser, namespacer, stub renderer, progressive-disclosure
 selector, dispatcher, workspace bridge, runtime, and output truncator.
@@ -76,7 +76,7 @@ Code is executed in a new environment each time. To save files, use the `save_ar
 ArtifactsSavedCallback = Callable[[InvocationContext, dict[str, int]], Awaitable[None]]
 
 
-class CodeModeExecutor(BaseCodeExecutor):
+class CodeModeCodeExecutor(BaseCodeExecutor):
     """Execute model-written Python in a sandbox with access to ADK tools."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -166,7 +166,7 @@ class CodeModeExecutor(BaseCodeExecutor):
             if self._bg_loop is None or not self._bg_loop.is_running:
                 self._bg_loop = _BackgroundLoop()
                 self._bg_loop.start()
-                CodeModeExecutor._ROOT_LOOP_REGISTRY.append(self._bg_loop)
+                CodeModeCodeExecutor._ROOT_LOOP_REGISTRY.append(self._bg_loop)
             return self._bg_loop.loop
 
     async def _aexecute(
@@ -597,11 +597,11 @@ class _BackgroundLoop:
 
 @atexit.register
 def _stop_background_loops() -> None:
-    for loop in CodeModeExecutor._ROOT_LOOP_REGISTRY:
+    for loop in CodeModeCodeExecutor._ROOT_LOOP_REGISTRY:
         try:
             loop.stop()
         except Exception:
             pass
 
 
-__all__ = ["ArtifactsSavedCallback", "CODE_MODE_SYSTEM_INSTRUCTION", "CodeModeExecutor"]
+__all__ = ["ArtifactsSavedCallback", "CODE_MODE_SYSTEM_INSTRUCTION", "CodeModeCodeExecutor"]

@@ -21,7 +21,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.genai import types as genai_types
 
-from adk_code_mode.executor import CodeModeExecutor
+from adk_code_mode.executor import CodeModeCodeExecutor
 
 from ._fake_runtime import FakeRuntime
 
@@ -140,7 +140,7 @@ async def test_sandbox_echoes_and_runs_tool() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[_EchoTool()],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -165,7 +165,7 @@ async def test_artifact_helpers_save_list_and_load_json() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -205,7 +205,7 @@ async def test_workspace_inputs_are_staged_and_outputs_are_collected() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -245,7 +245,7 @@ async def test_artifact_helpers_support_binary_content() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -286,7 +286,7 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -331,7 +331,7 @@ async def test_oversize_stdout_is_truncated_and_spilled() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=500,
@@ -360,7 +360,7 @@ async def test_timeout_terminates_hung_sandbox() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=500,
@@ -387,7 +387,7 @@ async def test_timeout_does_not_wait_for_in_flight_tool_call() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[_SlowTool()],
         runtime=FakeRuntime(),
         max_output_chars=500,
@@ -423,7 +423,7 @@ async def test_nonzero_exit_code_is_reported() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -451,7 +451,7 @@ async def test_traceback_also_includes_exit_code_marker() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -479,7 +479,7 @@ async def test_syntax_error_also_includes_exit_code_marker() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[],
         runtime=FakeRuntime(),
         max_output_chars=10_000,
@@ -507,7 +507,7 @@ async def test_prepare_tool_surface_re_resolves_dynamic_toolsets_without_invocat
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[_DynamicToolset()],
         runtime=FakeRuntime(),
     )
@@ -536,7 +536,7 @@ async def test_optional_stub_args_are_omitted_when_unspecified() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeExecutor(
+    executor = CodeModeCodeExecutor(
         tools=[_OptionalArgTool()],
         runtime=FakeRuntime(),
         max_output_chars=10_000,

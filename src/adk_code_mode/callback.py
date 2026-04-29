@@ -27,7 +27,7 @@ from adk_code_mode.tools import namespacing, normaliser
 from adk_code_mode.tools.catalog import render_catalog, render_overflow_catalog
 
 if TYPE_CHECKING:
-    from adk_code_mode.executor import CodeModeExecutor
+    from adk_code_mode.executor import CodeModeCodeExecutor
 
 logger = logging.getLogger("adk_code_mode.callback")
 
@@ -36,7 +36,7 @@ _TOOLS_CLOSE = "</tools>"
 
 
 def code_mode_before_model_callback(
-    executor: "CodeModeExecutor",
+    executor: "CodeModeCodeExecutor",
 ) -> Callable[..., Awaitable[None]]:
     """Build a ``before_model_callback`` bound to ``executor``."""
 

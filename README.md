@@ -1,12 +1,12 @@
 # ADK Code Mode
 
 A [Code Mode](https://blog.cloudflare.com/code-mode/) code executor for [Agent Development Kit (ADK)](https://github.com/google/adk-python).
-The `CodeModeExecutor` allows ADK to write Python code to call tools and list, save, and load Artifacts.
+The `CodeModeCodeExecutor` allows ADK to write Python code to call tools and list, save, and load Artifacts.
 
 The code is executed in a Docker container, tool calls are forwarded to the host, and are run through ADK's normal tool pipeline (callbacks, plugins, error handling).
 The default Docker image supports The Python Standard Library, extra Python packages can be added by building a custom Docker image.
 Files can be added to a single execution with `input_files`, and saved files are output as `output_files`.
-By default, `CodeModeExecutor` adds `list_artifacts`, `save_artifact`, and `load_artifact` tools to the execution environment to use files between executions.
+By default, `CodeModeCodeExecutor` adds `list_artifacts`, `save_artifact`, and `load_artifact` tools to the execution environment to use files between executions.
 
 Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and Anthropic's [Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp).
 
@@ -19,7 +19,7 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 - **Bounded stdout/stderr** — overflow lands in a session artifact instead of poisoning the prompt.
 - **Local development** — `DockerRuntime` runs the sandbox against your local Docker daemon for fast iteration.
 
-|                                     | BuiltInCodeExecutor | AgentEngineSandboxCodeExecutor  | VertexAiCodeExecutor            | ContainerCodeExecutor | GkeCodeExecutor | CodeModeExecutor         |
+|                                     | BuiltInCodeExecutor | AgentEngineSandboxCodeExecutor  | VertexAiCodeExecutor            | ContainerCodeExecutor | GkeCodeExecutor | CodeModeCodeExecutor         |
 | ----------------------------------- | ------------------- | ------------------------------- | ------------------------------- | --------------------- | --------------- | ------------------------ |
 | Call ADK tools from code            | no                  | no                              | no                              | no                    | no              | yes (with limitations)   |
 | Extra Python packages               | no                  | no (more than stdlib but fixed) | no (more than stdlib but fixed) | yes                   | yes             | yes                      |
@@ -50,18 +50,18 @@ uv add adk-code-mode
 
 ## 🚀 Usage
 
-Build a `CodeModeExecutor`, wire `code_mode_before_model_callback` into the agent, and put `CODE_MODE_SYSTEM_INSTRUCTION` somewhere in the agent's `instruction`:
+Build a `CodeModeCodeExecutor`, wire `code_mode_before_model_callback` into the agent, and put `CODE_MODE_SYSTEM_INSTRUCTION` somewhere in the agent's `instruction`:
 
 ```python
 from google.adk.agents import LlmAgent
 from adk_code_mode import (
     CODE_MODE_SYSTEM_INSTRUCTION,
-    CodeModeExecutor,
+    CodeModeCodeExecutor,
     DockerRuntime,
     code_mode_before_model_callback,
 )
 
-executor = CodeModeExecutor(
+executor = CodeModeCodeExecutor(
     tools=[my_fn_tool, McpToolset(...), OpenAPIToolset(...)],
     runtime=DockerRuntime(image="ghcr.io/a2anet/adk-code-mode:0.1.0"),
 )
@@ -100,7 +100,7 @@ Files created or modified under `/workspace` are returned as `CodeExecutionResul
 
 ### Artifacts
 
-`CodeModeExecutor` injects three regular tools into the catalog so model code can persist files across turns. They appear as top-level `from tools import …` imports:
+`CodeModeCodeExecutor` injects three regular tools into the catalog so model code can persist files across turns. They appear as top-level `from tools import …` imports:
 
 ```python
 import json
@@ -126,7 +126,7 @@ async def on_saved(invocation_context, delta):
     # ``delta`` is ``{filename: version}`` for everything saved this turn.
     ...
 
-CodeModeExecutor(tools=..., runtime=..., on_artifacts_saved=on_saved)
+CodeModeCodeExecutor(tools=..., runtime=..., on_artifacts_saved=on_saved)
 ```
 
 The hook fires once per `execute_code` call, after the sandbox closes, only when the dispatcher recorded at least one save. Exceptions raised inside the hook are logged and swallowed.
@@ -185,7 +185,7 @@ If you extended the base image to install extra Python packages, push that deriv
 
 ### Catalog overflow
 
-For very large tool surfaces the rendered catalog can dominate the prompt. `CodeModeExecutor.max_catalog_chars` (default `50_000`) is a soft cap. When the catalog exceeds it, the callback drops every tool section and replaces it with a short prose note telling the model how to navigate `/tools/` from Python:
+For very large tool surfaces the rendered catalog can dominate the prompt. `CodeModeCodeExecutor.max_catalog_chars` (default `50_000`) is a soft cap. When the catalog exceeds it, the callback drops every tool section and replaces it with a short prose note telling the model how to navigate `/tools/` from Python:
 
 ```
 <tools>
@@ -201,7 +201,7 @@ docstring, read its `.py` file with `open(...).read()`.
 Tune `max_catalog_chars` for your model's context budget. Pass it on the executor:
 
 ```python
-CodeModeExecutor(tools=..., runtime=..., max_catalog_chars=20_000)
+CodeModeCodeExecutor(tools=..., runtime=..., max_catalog_chars=20_000)
 ```
 
 ### Output truncation

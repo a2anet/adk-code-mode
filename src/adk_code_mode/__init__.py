@@ -6,14 +6,14 @@ from adk_code_mode.callback import code_mode_before_model_callback
 from adk_code_mode.executor import (
     CODE_MODE_SYSTEM_INSTRUCTION,
     ArtifactsSavedCallback,
-    CodeModeExecutor,
+    CodeModeCodeExecutor,
 )
 from adk_code_mode.runtime import DockerRuntime, SandboxHandle, SandboxRuntime
 
 __all__ = [
     "ArtifactsSavedCallback",
     "CODE_MODE_SYSTEM_INSTRUCTION",
-    "CodeModeExecutor",
+    "CodeModeCodeExecutor",
     "DockerRuntime",
     "SandboxHandle",
     "SandboxRuntime",

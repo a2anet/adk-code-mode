@@ -8,6 +8,8 @@ def test_default_dockerfile_installs_only_sandbox_wheel() -> None:
     dockerfile = (_REPO_ROOT / "docker" / "Dockerfile").read_text()
 
     assert "FROM python:3.13-slim" in dockerfile
+    assert 'org.opencontainers.image.source="https://github.com/a2anet/adk-code-mode"' in dockerfile
+    assert 'org.opencontainers.image.licenses="Apache-2.0"' in dockerfile
     assert "sandbox-wheel/dist/adk_code_mode_sandbox-*.whl" in dockerfile
     assert "adk_code_mode_sandbox" in dockerfile
     assert "adk-code-mode " not in dockerfile

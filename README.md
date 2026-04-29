@@ -63,7 +63,7 @@ from adk_code_mode import (
 
 executor = CodeModeExecutor(
     tools=[my_fn_tool, McpToolset(...), OpenAPIToolset(...)],
-    runtime=DockerRuntime(image="a2anet/adk-code-mode:0.1.0"),
+    runtime=DockerRuntime(image="ghcr.io/a2anet/adk-code-mode:0.1.0"),
 )
 
 root_agent = LlmAgent(
@@ -135,10 +135,10 @@ The hook fires once per `execute_code` call, after the sandbox closes, only when
 
 ### Building
 
-The published base image (`a2anet/adk-code-mode` on Docker Hub) ships with `adk-code-mode-sandbox` already installed and works as-is for any tools whose execution is fully host-side. To bake in extra Python packages the model's code can `import`, extend it from your project's Dockerfile:
+The published base image (`ghcr.io/a2anet/adk-code-mode` on GitHub Container Registry) ships with `adk-code-mode-sandbox` already installed and works as-is for any tools whose execution is fully host-side. To bake in extra Python packages the model's code can `import`, extend it from your project's Dockerfile:
 
 ```dockerfile
-FROM a2anet/adk-code-mode:0.1.0
+FROM ghcr.io/a2anet/adk-code-mode:0.1.0
 RUN pip install --no-cache-dir pandas==2.2.*
 ```
 
@@ -165,8 +165,8 @@ gcloud artifacts repositories create adk-code-mode \
     --location=<region>
 
 # Pull, retag, push.
-docker pull a2anet/adk-code-mode:0.1.0
-docker tag  a2anet/adk-code-mode:0.1.0 \
+docker pull ghcr.io/a2anet/adk-code-mode:0.1.0
+docker tag  ghcr.io/a2anet/adk-code-mode:0.1.0 \
     <region>-docker.pkg.dev/<project>/adk-code-mode/adk-code-mode:0.1.0
 docker push <region>-docker.pkg.dev/<project>/adk-code-mode/adk-code-mode:0.1.0
 ```

@@ -56,10 +56,13 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   docker-publish:
-    name: Publish base image to Docker Hub
+    name: Publish base image to GitHub Container Registry
     needs: [release-please, build, publish]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
@@ -71,11 +74,12 @@ jobs:
         run: uv build --wheel --out-dir sandbox-wheel/dist sandbox-wheel
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push base image
         uses: docker/build-push-action@v6
         with:
@@ -83,5 +87,5 @@ jobs:
           file: docker/Dockerfile
           push: true
           tags: |
-            a2anet/adk-code-mode:${{ needs.release-please.outputs.version }}
-            a2anet/adk-code-mode:latest
+            ghcr.io/a2anet/adk-code-mode:${{ needs.release-please.outputs.version }}
+            ghcr.io/a2anet/adk-code-mode:latest

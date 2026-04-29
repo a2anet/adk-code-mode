@@ -53,7 +53,7 @@ class DockerRuntime:
     Args:
         image: Fully-qualified container image tag. Must have
             ``adk-code-mode-sandbox`` installed. Extend the published
-            ``a2anet/adk-code-mode`` base image to bake in additional
+            ``ghcr.io/a2anet/adk-code-mode`` base image to bake in additional
             Python packages.
         network_mode: Docker network mode. Defaults to ``None``, which
             means the kwarg is not passed to ``containers.run`` and

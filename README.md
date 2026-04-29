@@ -19,8 +19,8 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 - **Bounded stdout/stderr** — overflow lands in a session artifact instead of poisoning the prompt.
 - **Local development** — `DockerRuntime` runs the sandbox against your local Docker daemon for fast iteration.
 
-|                                     | BuiltInCodeExecutor | AgentEngineSandboxCodeExecutor  | VertexAiCodeExecutor            | ContainerCodeExecutor | GkeCodeExecutor | CodeModeCodeExecutor         |
-| ----------------------------------- | ------------------- | ------------------------------- | ------------------------------- | --------------------- | --------------- | ------------------------ |
+|                                     | BuiltIn | AgentEngineSandbox              | VertexAi                        | Container | Gke | CodeMode                 |
+| ----------------------------------- | ------- | -------------------------------- | ------------------------------- | --------- | --- | ------------------------ |
 | Call ADK tools from code            | no                  | no                              | no                              | no                    | no              | yes (with limitations)   |
 | Extra Python packages               | no                  | no (more than stdlib but fixed) | no (more than stdlib but fixed) | yes                   | yes             | yes                      |
 | Variables are stateful              | no                  | yes                             | yes                             | no                    | no              | no                       |

@@ -33,11 +33,18 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Build package
         run: uv build
+      - name: Build sandbox package
+        run: uv build --out-dir sandbox-wheel/dist sandbox-wheel
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+      - name: Upload sandbox distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-dist
+          path: sandbox-wheel/dist/
 
   publish:
     name: Publish to PyPI
@@ -55,9 +62,27 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  publish-sandbox:
+    name: Publish sandbox package to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download sandbox distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sandbox-dist
+          path: sandbox-wheel/dist/
+      - name: Publish sandbox package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sandbox-wheel/dist/
+
   docker-publish:
     name: Publish base image to GitHub Container Registry
-    needs: [release-please, build, publish]
+    needs: [release-please, build, publish, publish-sandbox]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:

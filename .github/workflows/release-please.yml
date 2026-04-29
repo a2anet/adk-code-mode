@@ -54,3 +54,34 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  docker-publish:
+    name: Publish base image to Docker Hub
+    needs: [release-please, build, publish]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sandbox wheel
+        run: uv build --wheel --out-dir sandbox-wheel/dist sandbox-wheel
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            a2anet/adk-code-mode:${{ needs.release-please.outputs.version }}
+            a2anet/adk-code-mode:latest

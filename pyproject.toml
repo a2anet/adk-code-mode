@@ -7,7 +7,7 @@ name = "adk-code-mode"
 dynamic = ["version"]
 description = "A \"Code Mode\" Code Executor for ADK for agents to interact with tools, files, and custom packages with Python"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 keywords = ["adk", "code-mode", "code-executor", "agents", "a2a"]
 authors = [
@@ -16,18 +16,27 @@ authors = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = []
+dependencies = [
+    "google-adk>=1.0.0,<2.0.0",
+    "google-genai>=1.0.0",
+    "docker>=7.0.0",
+    "pydantic>=2.0.0",
+]
 
 [dependency-groups]
 dev = [
     "mypy>=1.19.0",
     "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.14.9",
+    "types-docker>=7.0.0",
 ]
 
 [project.urls]
@@ -39,17 +48,27 @@ Source = "https://github.com/A2ANet/adk-code-mode"
 path = "src/adk_code_mode/__about__.py"
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py310"
 line-length = 100
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.10"
 strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["sandbox-wheel/"]
+
+[[tool.mypy.overrides]]
+module = ["docker", "docker.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = ["--strict-markers", "--strict-config", "-ra"]
+pythonpath = ["src", "sandbox-wheel/src"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "-m", "not docker"]
+asyncio_mode = "auto"
+markers = [
+    "docker: integration tests that require a local Docker daemon. Run with `uv run pytest -m docker`.",
+]
 
 [tool.coverage.run]
 source = ["src"]

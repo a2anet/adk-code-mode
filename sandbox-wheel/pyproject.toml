@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adk-code-mode-sandbox"
+dynamic = ["version"]
+description = "In-sandbox runtime shim for adk-code-mode. Stdlib-only. Installs inside the container image the host runtime launches."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+keywords = ["adk", "code-mode", "sandbox"]
+authors = [
+  { name = "A2A Net", email = "hello@a2anet.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/A2ANet/adk-code-mode#readme"
+Issues = "https://github.com/A2ANet/adk-code-mode/issues"
+Source = "https://github.com/A2ANet/adk-code-mode"
+
+[tool.hatch.version]
+path = "src/adk_code_mode_sandbox/__about__.py"

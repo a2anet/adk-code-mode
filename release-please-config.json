@@ -6,7 +6,8 @@
             "package-name": "adk-code-mode",
             "changelog-path": "CHANGELOG.md",
             "extra-files": [
-                "src/adk_code_mode/__about__.py"
+                "src/adk_code_mode/__about__.py",
+                "sandbox-wheel/src/adk_code_mode_sandbox/__about__.py"
             ]
         }
     }

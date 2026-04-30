@@ -65,11 +65,14 @@ class ProtocolVersionMismatchError(RuntimeError):
 logger = logging.getLogger("adk_code_mode.executor")
 
 CODE_MODE_SYSTEM_INSTRUCTION = """\
-Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox, and the stdout and stderr will be returned to you.
+# How to execute code and use tools
+Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
+The Python Standard Library and a custom set of tools are available to you.
+To see the result of your code, you need to print it. Don't make assumptions about the tool result format.
 
-All of the standard Python libraries and a custom set of tools are available to you.
-
-Code is executed in a new environment each time. To save files, use the `save_artifact` tool. To list available artifacts, use the `list_artifacts` tool. And to load an artifact, use the `load_artifact` tool.
+# How to use files and variables in between executions
+Code is executed in a new environment each time. Tool results are automatically saved as Artifacts.
+To list available Artifacts, use the `list_artifacts` tool. To save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
 """
 
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.1.0...adk-code-mode-v0.2.0) (2026-05-03)
+
+
+### Features
+
+* add `RemoteBackend`, sandbox hardening, and make `README.md` more concise ([a1a70ee](https://github.com/a2anet/adk-code-mode/commit/a1a70eec0686f164ce3796ba1d82bb82b7fbda59))
+
+
+### Bug Fixes
+
+* improve `CODE_MODE_SYSTEM_INSTRUCTION` ([0d00863](https://github.com/a2anet/adk-code-mode/commit/0d008636e2e273b438192f737e20e207c165a610))
+
 ## 0.1.0 (2026-04-29)
 
 

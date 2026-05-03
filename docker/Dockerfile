@@ -8,5 +8,11 @@ COPY sandbox-wheel/dist/adk_code_mode_sandbox-*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/adk_code_mode_sandbox-*.whl \
     && rm /tmp/adk_code_mode_sandbox-*.whl
 
+RUN useradd -m -d /home/sandbox sandbox \
+    && mkdir -p /workspace \
+    && chown sandbox:sandbox /workspace
+USER sandbox
+
+EXPOSE 8080
 WORKDIR /workspace
 ENTRYPOINT ["python", "-m", "adk_code_mode_sandbox"]

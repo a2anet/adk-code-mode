@@ -7,10 +7,10 @@ Invoked as ``python -m adk_code_mode_sandbox``. Three control-pipe transports
 are supported, chosen by env var (checked in order):
 
 - ``ADK_CODE_MODE_CONTROL_TCP`` → ``host:port`` TCP endpoint on the host
-  (used by the Docker runtime; works on mac/Windows/Linux uniformly).
+  (used by ``UnsafeLocalDockerBackend``; works on mac/Windows/Linux uniformly).
 - ``ADK_CODE_MODE_CONTROL_SOCKET`` → Unix domain socket path (used by the
   in-process test ``FakeRuntime``; broken on Docker Desktop macOS so not
-  used by ``DockerRuntime``).
+  used by ``UnsafeLocalDockerBackend``).
 - ``ADK_CODE_MODE_CONTROL_FD`` → inherited fd(s). Accepts one fd
   (bidirectional) or two comma-separated fds (read,write).
 
@@ -73,20 +73,51 @@ def _open_control_streams() -> tuple[Any, Any]:
     )
 
 
-def _prepare_sys_path() -> None:
+def _prepare_sys_path(tools_dir: str | None = None) -> None:
     """Make the generated tools directory importable from user code."""
-    if os.path.isdir(TOOLS_DIR):
-        # TOOLS_DIR is the package directory itself (normally /tools), not a
+    target = tools_dir or TOOLS_DIR
+    if os.path.isdir(target):
+        # target is the package directory itself (normally /tools), not a
         # parent that contains tools/. Add the parent so `import tools` resolves
         # directly to /tools/__init__.py instead of requiring /tools/tools.
-        package_parent = os.path.dirname(os.path.abspath(TOOLS_DIR)) or os.sep
+        package_parent = os.path.dirname(os.path.abspath(target)) or os.sep
         if package_parent not in sys.path:
             sys.path.insert(0, package_parent)
 
 
-def _prepare_workdir() -> None:
-    os.makedirs(WORKDIR, exist_ok=True)
-    os.chdir(WORKDIR)
+def _prepare_workdir(workdir: str | None = None) -> None:
+    target = workdir or WORKDIR
+    os.makedirs(target, exist_ok=True)
+    os.chdir(target)
+
+
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "PYTHONHASHSEED",
+        "PYTHONDONTWRITEBYTECODE",
+    }
+)
+
+
+def _sanitize_environ() -> None:
+    """Strip sensitive env vars before user code runs.
+
+    Preserves only a known-safe allowlist plus LC_* locale vars. Everything
+    else (control tokens, platform credentials, extra_env from the host) is
+    removed so user code cannot read it.
+    """
+    for key in list(os.environ):
+        if key not in _ENV_ALLOWLIST and not key.startswith("LC_"):
+            del os.environ[key]
 
 
 def _make_globals() -> dict[str, Any]:
@@ -126,11 +157,22 @@ def _run_code(code: str) -> int:
 
 
 def main() -> int:
+    if os.environ.get("ADK_CODE_MODE_CONTROL_HTTP"):
+        import asyncio
+
+        from adk_code_mode_sandbox._http_server import AUTH_TOKEN_ENV, serve
+
+        port = int(os.environ.get("PORT", "8080"))
+        token = os.environ.get(AUTH_TOKEN_ENV)
+        asyncio.run(serve(port, token))
+        return 0
+
     reader, writer = _open_control_streams()
     client = RpcClient(reader=reader, writer=writer)
     _rpc_client.install(client)
     _prepare_sys_path()
     _prepare_workdir()
+    _sanitize_environ()
 
     client.send(ReadyFrame())
 

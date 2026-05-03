@@ -9,8 +9,8 @@ identical on every release.
 
 Design rules:
 
-- Zero dependencies outside the Python standard library. The sandbox wheel
-  must remain stdlib-only so the container image does not pull ADK / google-genai.
+- Zero dependencies outside the Python standard library (the sandbox wheel
+  has other dependencies, but this module must stay stdlib-only).
 - Frames are JSON objects, one per newline-terminated UTF-8 line.
 - Every frame carries a ``kind`` discriminator. Correlated pairs (e.g.
   ``tool_call`` / ``tool_result``) carry a string ``id``.
@@ -32,6 +32,7 @@ FrameKind = Literal[
     "tool_result",
     "log",
     "done",
+    "output",
     "shutdown",
 ]
 
@@ -101,6 +102,16 @@ class DoneFrame:
 
 
 @dataclass(frozen=True)
+class OutputFrame:
+    """Server → host. Captured stdout/stderr after subprocess exit (HTTP mode only)."""
+
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    kind: Literal["output"] = "output"
+
+
+@dataclass(frozen=True)
 class ShutdownFrame:
     """Host → sandbox. Graceful shutdown."""
 
@@ -108,7 +119,14 @@ class ShutdownFrame:
 
 
 Frame = (
-    ReadyFrame | RunFrame | ToolCallFrame | ToolResultFrame | LogFrame | DoneFrame | ShutdownFrame
+    ReadyFrame
+    | RunFrame
+    | ToolCallFrame
+    | ToolResultFrame
+    | LogFrame
+    | DoneFrame
+    | OutputFrame
+    | ShutdownFrame
 )
 
 
@@ -119,6 +137,7 @@ _KIND_TO_CLS: dict[str, type] = {
     "tool_result": ToolResultFrame,
     "log": LogFrame,
     "done": DoneFrame,
+    "output": OutputFrame,
     "shutdown": ShutdownFrame,
 }
 
@@ -186,6 +205,7 @@ __all__ = [
     "ToolErrorPayload",
     "LogFrame",
     "DoneFrame",
+    "OutputFrame",
     "ShutdownFrame",
     "ProtocolError",
     "encode",

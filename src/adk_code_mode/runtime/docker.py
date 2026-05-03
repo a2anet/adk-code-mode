@@ -25,6 +25,7 @@ through ``run_kwargs``.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import secrets
 import shutil
@@ -36,7 +37,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from adk_code_mode.runtime.base import SandboxHandle, SandboxResult
+from adk_code_mode.runtime.base import SandboxSession, SandboxResult
 from adk_code_mode.runtime.protocol import Frame, ProtocolError, decode, encode
 
 _CONTAINER_TOOLS_MOUNT = "/tools"
@@ -47,8 +48,8 @@ _TOKEN_HANDSHAKE_TIMEOUT_S = 5.0
 
 
 @dataclass
-class DockerRuntime:
-    """Docker-backed :class:`SandboxRuntime`.
+class UnsafeLocalDockerBackend:
+    """Docker-backed :class:`SandboxBackend` for **local development only**.
 
     Args:
         image: Fully-qualified container image tag. Must have
@@ -76,6 +77,7 @@ class DockerRuntime:
     cpu_period: int | None = 100_000
     cpu_quota: int | None = 100_000
     read_only: bool = True
+    cap_drop: list[str] = field(default_factory=lambda: ["ALL"])
     extra_env: Mapping[str, str] = field(default_factory=dict)
     run_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
@@ -85,12 +87,12 @@ class DockerRuntime:
         tools_files: Mapping[str, str],
         workdir_path: str,
         timeout_seconds: int | None,
-    ) -> SandboxHandle:
+    ) -> SandboxSession:
         import docker  # local import so the rest of the package works without it
 
         if self.network_mode == "none":
             raise ValueError(
-                "DockerRuntime requires container network access to reach the host control listener; "
+                "UnsafeLocalDockerBackend requires container network access to reach the host control listener; "
                 "network_mode='none' is unsupported"
             )
 
@@ -130,6 +132,7 @@ class DockerRuntime:
                     "cpu_period": self.cpu_period,
                     "cpu_quota": self.cpu_quota,
                     "read_only": self.read_only,
+                    "cap_drop": self.cap_drop,
                     "environment": env,
                     "volumes": volumes,
                     "stdout": True,
@@ -162,7 +165,7 @@ class DockerRuntime:
                     pass
                 raise
 
-            return _DockerSandboxHandle(
+            return _DockerSandboxSession(
                 container=container,
                 control_sock=conn,
                 listener=listener,
@@ -212,7 +215,7 @@ def _accept_connection(
         except (OSError, TimeoutError):
             conn.close()
             continue
-        if line == expected:
+        if hmac.compare_digest(line, expected):
             conn.setblocking(False)
             return conn
         conn.close()
@@ -230,7 +233,7 @@ def _read_line(conn: socket.socket, *, max_bytes: int) -> bytes:
     raise OSError("token line exceeded max length")
 
 
-class _DockerSandboxHandle(SandboxHandle):
+class _DockerSandboxSession(SandboxSession):
     def __init__(
         self,
         *,
@@ -328,4 +331,4 @@ class _DockerSandboxHandle(SandboxHandle):
         shutil.rmtree(self._tools_dir, ignore_errors=True)
 
 
-__all__ = ["DockerRuntime"]
+__all__ = ["UnsafeLocalDockerBackend"]

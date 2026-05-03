@@ -40,7 +40,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from adk_code_mode._artifact_tools import ARTIFACT_TOOLS
 from adk_code_mode.output import truncate
-from adk_code_mode.runtime.base import SandboxHandle, SandboxResult, SandboxRuntime
+from adk_code_mode.runtime.base import SandboxResult, SandboxBackend, SandboxSession
 from adk_code_mode.runtime.protocol import (
     PROTOCOL_VERSION,
     DoneFrame,
@@ -85,8 +85,9 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     tools: list[BaseTool | BaseToolset] = Field(default_factory=list)
-    runtime: SandboxRuntime = Field(...)
+    backend: SandboxBackend = Field(...)
     max_output_chars: int = 50_000
+    max_code_chars: int = 1_000_000
     max_catalog_chars: int = 50_000
     """Soft cap on the rendered catalog string. Above this the callback drops
     the per-tool sections and tells the model to navigate ``/tools/`` from
@@ -118,7 +119,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         self,
         *,
         tools: Sequence[BaseTool | BaseToolset | Callable[..., Any]] = (),
-        runtime: SandboxRuntime,
+        backend: SandboxBackend,
         include_artifact_tools: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -138,7 +139,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 )
         super().__init__(
             tools=adapted,
-            runtime=runtime,
+            backend=backend,
             include_artifact_tools=include_artifact_tools,
             **kwargs,
         )
@@ -180,6 +181,14 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         session_id = invocation_context.session.id
         execution_id = code_execution_input.execution_id or session_id
 
+        code = code_execution_input.code
+        if self.max_code_chars and len(code) > self.max_code_chars:
+            return CodeExecutionResult(
+                stdout="",
+                stderr=f"Code exceeds maximum allowed length ({len(code):,} > {self.max_code_chars:,} chars).",
+                output_files=[],
+            )
+
         prepared = await self._prepare_tool_surface(invocation_context)
 
         run_workspace = _prepare_run_workspace(code_execution_input.input_files)
@@ -192,7 +201,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 per_tool_timeout_seconds=self.per_tool_timeout_seconds,
             )
 
-            handle = await self.runtime.start(
+            session = await self.backend.start(
                 tools_files=prepared.tools_map,
                 workdir_path=run_workspace.root,
                 timeout_seconds=self.timeout_seconds,
@@ -202,9 +211,9 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             try:
                 run_task = asyncio.create_task(
                     _run_sandbox(
-                        handle=handle,
+                        session=session,
                         dispatcher=dispatcher,
-                        code=code_execution_input.code,
+                        code=code,
                     )
                 )
                 result = await asyncio.wait_for(
@@ -215,7 +224,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 timed_out = True
                 result = None
             finally:
-                await handle.close()
+                await session.close()
 
             output_files = run_workspace.collect_output_files()
             await self._fire_artifacts_saved(invocation_context, dispatcher.artifact_delta)
@@ -398,24 +407,24 @@ def _stderr_with_exit_code(stderr: str, exit_code: int) -> str:
 
 async def _run_sandbox(
     *,
-    handle: SandboxHandle,
+    session: SandboxSession,
     dispatcher: Dispatcher,
     code: str,
 ) -> SandboxResult:
-    host_loop = asyncio.create_task(_host_loop(handle=handle, dispatcher=dispatcher))
+    host_loop = asyncio.create_task(_host_loop(session=session, dispatcher=dispatcher))
     done_exit_code: int | None = None
     try:
-        await handle.send(RunFrame(code=code))
+        await session.send(RunFrame(code=code))
         done_exit_code = await host_loop
     finally:
         if not host_loop.done():
             host_loop.cancel()
             await asyncio.gather(host_loop, return_exceptions=True)
     try:
-        await handle.send(ShutdownFrame())
+        await session.send(ShutdownFrame())
     except Exception:
         pass
-    result = await handle.wait()
+    result = await session.wait()
     if done_exit_code is None:
         return result
     return SandboxResult(
@@ -427,7 +436,7 @@ async def _run_sandbox(
 
 async def _host_loop(
     *,
-    handle: SandboxHandle,
+    session: SandboxSession,
     dispatcher: Dispatcher,
 ) -> int | None:
     """Consume frames from the sandbox until a ``DoneFrame`` arrives.
@@ -436,7 +445,7 @@ async def _host_loop(
     slow tool doesn't block other calls.
     """
     pending: list[asyncio.Task[Any]] = []
-    frames = handle.frames()
+    frames = session.frames()
     try:
         async for frame in frames:
             if isinstance(frame, ReadyFrame):
@@ -449,7 +458,7 @@ async def _host_loop(
             if isinstance(frame, DoneFrame):
                 return frame.exit_code
             if isinstance(frame, ToolCallFrame):
-                pending.append(asyncio.create_task(_handle_tool_call(handle, dispatcher, frame)))
+                pending.append(asyncio.create_task(_handle_tool_call(session, dispatcher, frame)))
                 continue
             if isinstance(frame, LogFrame):
                 logger.log(
@@ -468,7 +477,7 @@ async def _host_loop(
 
 
 async def _handle_tool_call(
-    handle: SandboxHandle,
+    session: SandboxSession,
     dispatcher: Dispatcher,
     frame: ToolCallFrame,
 ) -> None:
@@ -485,7 +494,7 @@ async def _handle_tool_call(
                     message=result.error_message or "",
                 ),
             )
-        await handle.send(reply)
+        await session.send(reply)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -499,7 +508,7 @@ async def _handle_tool_call(
             ),
         )
         try:
-            await handle.send(fallback)
+            await session.send(fallback)
         except Exception:
             logger.exception("failed to send fallback tool_result frame for id=%s", frame.id)
 

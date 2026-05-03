@@ -25,12 +25,16 @@ classifiers = [
 dependencies = [
     "google-adk>=1.0.0,<2.0.0",
     "google-genai>=1.0.0",
-    "docker>=7.0.0",
     "pydantic>=2.0.0",
+    "websockets>=14.0",
 ]
+
+[project.optional-dependencies]
+docker = ["docker>=7.0.0"]
 
 [dependency-groups]
 dev = [
+    "adk-code-mode[docker]",
     "mypy>=1.19.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -59,6 +63,10 @@ exclude = ["sandbox-wheel/"]
 
 [[tool.mypy.overrides]]
 module = ["docker", "docker.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["websockets", "websockets.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

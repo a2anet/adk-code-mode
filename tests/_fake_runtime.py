@@ -18,13 +18,13 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from adk_code_mode.runtime.base import SandboxHandle, SandboxResult, SandboxRuntime
+from adk_code_mode.runtime.base import SandboxSession, SandboxResult, SandboxBackend
 from adk_code_mode.runtime.protocol import Frame, ProtocolError, decode, encode
 
 _SANDBOX_SRC = Path(__file__).resolve().parent.parent / "sandbox-wheel" / "src"
 
 
-class FakeRuntime(SandboxRuntime):
+class FakeRuntime(SandboxBackend):
     """Runs the sandbox as a local subprocess for in-process integration tests."""
 
     async def start(
@@ -33,7 +33,7 @@ class FakeRuntime(SandboxRuntime):
         tools_files: Mapping[str, str],
         workdir_path: str,
         timeout_seconds: int | None,
-    ) -> SandboxHandle:
+    ) -> SandboxSession:
         tools_root = tempfile.mkdtemp(prefix="fake-runtime-tools-")
         tools_dir = os.path.join(tools_root, "tools")
         os.makedirs(tools_dir, exist_ok=True)
@@ -79,7 +79,7 @@ class FakeRuntime(SandboxRuntime):
             raise
         conn.setblocking(False)
 
-        return _FakeHandle(
+        return _FakeSession(
             conn=conn,
             listener=listener,
             proc=proc,
@@ -88,7 +88,7 @@ class FakeRuntime(SandboxRuntime):
         )
 
 
-class _FakeHandle(SandboxHandle):
+class _FakeSession(SandboxSession):
     def __init__(
         self,
         *,

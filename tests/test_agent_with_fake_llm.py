@@ -96,7 +96,7 @@ def _build_runner(
 ) -> tuple[Runner, str, str]:
     executor = CodeModeCodeExecutor(
         tools=[_EchoTool()],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     object.__setattr__(

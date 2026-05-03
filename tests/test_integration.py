@@ -142,7 +142,7 @@ async def test_sandbox_echoes_and_runs_tool() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[_EchoTool()],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     code = "from tools import echo\nr = echo(message='hello from sandbox')\nprint('ECHO:', r)\n"
@@ -167,7 +167,7 @@ async def test_artifact_helpers_save_list_and_load_json() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     code = (
@@ -207,7 +207,7 @@ async def test_workspace_inputs_are_staged_and_outputs_are_collected() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     code = (
@@ -247,7 +247,7 @@ async def test_artifact_helpers_support_binary_content() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
 
@@ -288,7 +288,7 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
 
@@ -333,7 +333,7 @@ async def test_oversize_stdout_is_truncated_and_spilled() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=500,
     )
     code = "print('x' * 5000)\n"
@@ -362,7 +362,7 @@ async def test_timeout_terminates_hung_sandbox() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=500,
         timeout_seconds=1,
     )
@@ -389,7 +389,7 @@ async def test_timeout_does_not_wait_for_in_flight_tool_call() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[_SlowTool()],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=500,
         timeout_seconds=1,
     )
@@ -425,7 +425,7 @@ async def test_nonzero_exit_code_is_reported() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
 
@@ -453,7 +453,7 @@ async def test_traceback_also_includes_exit_code_marker() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
 
@@ -481,7 +481,7 @@ async def test_syntax_error_also_includes_exit_code_marker() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
 
@@ -509,7 +509,7 @@ async def test_prepare_tool_surface_re_resolves_dynamic_toolsets_without_invocat
 
     executor = CodeModeCodeExecutor(
         tools=[_DynamicToolset()],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
     )
 
     ctx.invocation_id = "test-inv-alpha"
@@ -538,7 +538,7 @@ async def test_optional_stub_args_are_omitted_when_unspecified() -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[_OptionalArgTool()],
-        runtime=FakeRuntime(),
+        backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     code = "from tools import optional_lookup\nprint(optional_lookup())\n"

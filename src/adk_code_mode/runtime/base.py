@@ -11,8 +11,8 @@ A runtime is responsible for:
 - draining stdout/stderr when the run ends
 - tearing the environment down when the handle is closed
 
-All public runtimes satisfy the same ``SandboxRuntime`` protocol so the
-executor can stay runtime-agnostic.
+All public backends satisfy the same ``SandboxBackend`` protocol so the
+executor can stay backend-agnostic.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ class SandboxFiles:
     files: Mapping[str, str]
 
 
-class SandboxHandle(Protocol):
-    """Live handle to a running sandbox."""
+class SandboxSession(Protocol):
+    """Live session with a running sandbox."""
 
     async def send(self, frame: Frame) -> None: ...
 
@@ -62,8 +62,8 @@ class SandboxHandle(Protocol):
 
 
 @runtime_checkable
-class SandboxRuntime(Protocol):
-    """Factory for ``SandboxHandle`` instances."""
+class SandboxBackend(Protocol):
+    """Factory for ``SandboxSession`` instances."""
 
     async def start(
         self,
@@ -71,7 +71,7 @@ class SandboxRuntime(Protocol):
         tools_files: Mapping[str, str],
         workdir_path: str,
         timeout_seconds: int | None,
-    ) -> SandboxHandle:
+    ) -> SandboxSession:
         """Launch a sandbox.
 
         Args:
@@ -85,4 +85,4 @@ class SandboxRuntime(Protocol):
         ...
 
 
-__all__ = ["SandboxFiles", "SandboxHandle", "SandboxResult", "SandboxRuntime"]
+__all__ = ["SandboxBackend", "SandboxFiles", "SandboxResult", "SandboxSession"]

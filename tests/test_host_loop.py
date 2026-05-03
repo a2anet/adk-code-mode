@@ -56,13 +56,13 @@ class _StubHandle:
 
 async def test_host_loop_accepts_matching_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(), DoneFrame()])
-    await _host_loop(handle=handle, dispatcher=None)  # type: ignore[arg-type]
+    await _host_loop(session=handle, dispatcher=None)  # type: ignore[arg-type]
 
 
 async def test_host_loop_rejects_mismatched_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(protocol_version=PROTOCOL_VERSION + 1), DoneFrame()])
     with pytest.raises(ProtocolVersionMismatchError):
-        await _host_loop(handle=handle, dispatcher=None)  # type: ignore[arg-type]
+        await _host_loop(session=handle, dispatcher=None)  # type: ignore[arg-type]
 
 
 def test_json_safe_handles_common_non_json_leaf_types() -> None:

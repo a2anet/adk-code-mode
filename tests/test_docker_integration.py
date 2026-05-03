@@ -10,7 +10,7 @@ Skips cleanly if:
 
 The test builds a throwaway ``python:3.13-slim``-based image pinned to the
 freshly built local sandbox wheel, runs a single
-``CodeModeCodeExecutor.execute_code`` round trip through ``DockerRuntime``, and
+``CodeModeCodeExecutor.execute_code`` round trip through ``UnsafeLocalDockerBackend``, and
 asserts the sandbox's stdout echoed the tool result back.
 """
 
@@ -27,7 +27,7 @@ from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types as genai_types
 
-from adk_code_mode import CodeModeCodeExecutor, DockerRuntime
+from adk_code_mode import CodeModeCodeExecutor, UnsafeLocalDockerBackend
 
 from ._docker_helpers import build_sandbox_image, build_sandbox_wheel, docker_ok
 
@@ -95,7 +95,7 @@ async def test_docker_round_trip(docker_image: str) -> None:
 
     executor = CodeModeCodeExecutor(
         tools=[_EchoTool()],
-        runtime=DockerRuntime(image=docker_image),
+        backend=UnsafeLocalDockerBackend(image=docker_image),
         max_output_chars=10_000,
         timeout_seconds=60,
     )

@@ -7,6 +7,7 @@ import pytest
 
 from adk_code_mode.runtime.protocol import (
     DoneFrame,
+    OutputFrame,
     ProtocolError,
     ReadyFrame,
     RunFrame,
@@ -52,6 +53,11 @@ def test_tool_result_error_roundtrip() -> None:
     assert decoded.error is not None
     assert decoded.error.type == "RuntimeError"
     assert decoded.error.message == "boom"
+
+
+def test_output_roundtrip() -> None:
+    src = OutputFrame(stdout="hello\n", stderr="warn\n", exit_code=1)
+    assert _roundtrip(src) == src
 
 
 def test_done_roundtrip() -> None:

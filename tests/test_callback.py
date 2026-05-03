@@ -44,7 +44,7 @@ class _FakeContext:
 
 
 def _make_executor(tools: list[BaseTool], **kwargs: Any) -> CodeModeCodeExecutor:
-    return CodeModeCodeExecutor(tools=tools, runtime=FakeRuntime(), **kwargs)
+    return CodeModeCodeExecutor(tools=tools, backend=FakeRuntime(), **kwargs)
 
 
 @pytest.mark.asyncio

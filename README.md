@@ -126,10 +126,10 @@ Setting `ADK_CODE_MODE_CONTROL_HTTP=1` activates HTTP mode. The container:
 ```bash
 # Push the sandbox image to Artifact Registry
 gcloud auth configure-docker <region>-docker.pkg.dev
-docker pull ghcr.io/a2anet/adk-code-mode:latest
+docker pull --platform linux/amd64 ghcr.io/a2anet/adk-code-mode:latest
 docker tag  ghcr.io/a2anet/adk-code-mode:latest \
-    <region>-docker.pkg.dev/<project>/adk-code-mode/sandbox:latest
-docker push <region>-docker.pkg.dev/<project>/adk-code-mode/sandbox:latest
+    <region>-docker.pkg.dev/<project>/<repository>/adk-code-mode-sandbox:latest
+docker push <region>-docker.pkg.dev/<project>/<repository>/adk-code-mode-sandbox:latest
 
 # Create a VPC connector with no egress routes (blocks outbound network from sandbox)
 gcloud compute networks create adk-sandbox-vpc --subnet-mode=custom
@@ -149,16 +149,17 @@ gcloud compute networks vpc-access connectors create adk-sandbox-connector \
 
 # Deploy — note --concurrency 1 and --vpc-egress=all-traffic
 gcloud run deploy adk-code-mode-sandbox \
-    --image <region>-docker.pkg.dev/<project>/adk-code-mode/sandbox:latest \
+    --image <region>-docker.pkg.dev/<project>/<repository>/adk-code-mode-sandbox:latest \
     --region <region> \
     --port 8080 \
     --cpu 1 \
     --memory 1Gi \
     --concurrency 1 \
-    --no-allow-unauthenticated \
+    --allow-unauthenticated \
     --vpc-connector=adk-sandbox-connector \
     --vpc-egress=all-traffic \
-    --set-env-vars "ADK_CODE_MODE_CONTROL_HTTP=1,ADK_CODE_MODE_AUTH_TOKEN=<your-secret>"
+    --set-env-vars "ADK_CODE_MODE_CONTROL_HTTP=1" \
+    --set-secrets "ADK_CODE_MODE_AUTH_TOKEN=<your-secret-name>:latest"
 ```
 
 Then in your agent:

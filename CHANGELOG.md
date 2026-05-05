@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.0...adk-code-mode-v0.2.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* rename `<tools>` tag to `<code-mode>` and update `CODE_MODE_SYSTEM_INSTRUCTION` ([0a06bfb](https://github.com/a2anet/adk-code-mode/commit/0a06bfbdf22db6e0226e477d0ed074a6cc4d1515))
+
+
+### Documentation
+
+* update `README.md` with deployment instructions ([1dd7a95](https://github.com/a2anet/adk-code-mode/commit/1dd7a95197fd56231ba97182526a825baf18508a))
+
 ## [0.2.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.1.0...adk-code-mode-v0.2.0) (2026-05-03)
 
 

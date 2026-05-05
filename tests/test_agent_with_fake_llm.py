@@ -172,7 +172,7 @@ async def test_agent_runs_code_block_through_executor() -> None:
     else:
         rendered = "\n".join(p for p in system_instruction if isinstance(p, str))
     assert CODE_MODE_SYSTEM_INSTRUCTION.split("\n", 1)[0] in rendered
-    assert "<tools>" in rendered and "</tools>" in rendered
+    assert "<code-mode>" in rendered and "</code-mode>" in rendered
     assert "def echo" in rendered
 
 

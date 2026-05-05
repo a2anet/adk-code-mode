@@ -51,12 +51,17 @@ Requires Python 3.10+. Local development requires [Docker](https://docs.docker.c
 
 ## 🚀 Usage
 
-Build a `CodeModeCodeExecutor`, wire `code_mode_before_model_callback` into the agent, and put `CODE_MODE_SYSTEM_INSTRUCTION` in the agent's `instruction`. The callback injects the tool catalog into the system prompt — skip it and the model has no idea what tools exist.
+Build a `CodeModeCodeExecutor`, then wire three things into the agent:
+
+- **`CODE_MODE_SYSTEM_INSTRUCTION`** — append to the agent's `instruction`. Teaches the model how to write code blocks and use artifacts.
+- **`code_mode_before_model_callback`** — set as `before_model_callback`. Injects the tool catalog (`<code-mode>` block) into the system prompt on every model turn.
+- **`generate_content_config`** with `function_calling_config.mode="NONE"` — disables native function calling so the model writes Python instead of attempting tool calls that fail with `MALFORMED_FUNCTION_CALL` (since `tools=[]`).
 
 ### Production (remote sandbox)
 
 ```python
 from google.adk.agents import LlmAgent
+from google.genai import types as genai_types
 from adk_code_mode import (
     CODE_MODE_SYSTEM_INSTRUCTION,
     CodeModeCodeExecutor,
@@ -78,6 +83,11 @@ root_agent = LlmAgent(
     instruction=f"You are a helpful assistant.\n\n{CODE_MODE_SYSTEM_INSTRUCTION}",
     tools=[],  # do NOT also bind tools here; the executor owns them.
     code_executor=executor,
+    generate_content_config=genai_types.GenerateContentConfig(
+        tool_config=genai_types.ToolConfig(
+            function_calling_config=genai_types.FunctionCallingConfig(mode="NONE"),
+        ),
+    ),
     before_model_callback=code_mode_before_model_callback(executor),
 )
 ```
@@ -302,12 +312,41 @@ The only things crossing the boundary are: code, tool call arguments, tool retur
 
 ### What the model sees
 
-Your `instruction` (containing `CODE_MODE_SYSTEM_INSTRUCTION`) followed by a `<tools>` block appended by the callback:
+Your `instruction` (containing `CODE_MODE_SYSTEM_INSTRUCTION`) followed by a `<code-mode>` block appended by the callback:
 
 ```
 …your instruction…
 
-<tools>
+# How to execute code and use tools
+Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
+The Python Standard Library and a custom set of tools are available to you.
+To see the result of your code, you need to print it.
+
+For example, if you had the following tool:
+
+```
+from tools.slack import send_message
+
+def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any:
+    """Send a message to a Slack channel."""
+    ...
+```
+
+To call the tool, you should write:
+
+"""
+```python
+from tools.slack import send_message
+
+print(send_message(channel="C123", text="hi"))
+```
+"""
+
+# How to use files and variables in between executions
+Code is executed in a new environment each time.
+To list available Artifacts, use the `list_artifacts` tool. To save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
+
+<code-mode>
 
 # tools.slack
 
@@ -326,7 +365,20 @@ def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any
 from tools import save_artifact, load_artifact, list_artifacts
 …
 
-</tools>
+</code-mode>
+```
+
+When the rendered catalog exceeds `max_catalog_chars`, the per-tool sections are replaced with:
+
+```
+<code-mode>
+A `tools` package is available in the sandbox. List `/tools/` with
+`pathlib.Path('/tools').iterdir()`. Each entry is either a `.py` file
+(a top-level tool, importable as `from tools import <name>`) or a
+subdirectory (a namespace, with tools importable as
+`from tools.<namespace> import <name>`). To see a tool's signature and
+docstring, read its `.py` file with `open(...).read()`.
+</code-mode>
 ```
 
 Text and JSON-like MIME types travel as plain strings in artifact tools; binary content is base64-encoded. `load_artifact` returns `{"kind": "text" | "bytes", "data": str, "mime_type": str | None}`.

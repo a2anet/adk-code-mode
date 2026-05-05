@@ -57,8 +57,8 @@ async def test_callback_appends_block_when_system_instruction_is_none() -> None:
 
     instruction = request.config.system_instruction
     assert isinstance(instruction, str)
-    assert instruction.startswith("<tools>")
-    assert instruction.rstrip().endswith("</tools>")
+    assert instruction.startswith("<code-mode>")
+    assert instruction.rstrip().endswith("</code-mode>")
     assert "def ping" in instruction
 
 
@@ -73,8 +73,8 @@ async def test_callback_appends_block_to_string_system_instruction() -> None:
     instruction = request.config.system_instruction
     assert isinstance(instruction, str)
     assert instruction.startswith("You are an assistant.")
-    assert "<tools>" in instruction
-    assert instruction.rstrip().endswith("</tools>")
+    assert "<code-mode>" in instruction
+    assert instruction.rstrip().endswith("</code-mode>")
 
 
 @pytest.mark.asyncio
@@ -88,8 +88,8 @@ async def test_callback_appends_block_to_list_system_instruction() -> None:
     instruction = request.config.system_instruction
     assert isinstance(instruction, list)
     assert instruction[:2] == ["First part.", "Second part."]
-    assert instruction[-1].startswith("<tools>")
-    assert instruction[-1].rstrip().endswith("</tools>")
+    assert instruction[-1].startswith("<code-mode>")
+    assert instruction[-1].rstrip().endswith("</code-mode>")
 
 
 @pytest.mark.asyncio

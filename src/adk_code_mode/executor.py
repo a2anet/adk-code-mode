@@ -40,7 +40,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from adk_code_mode._artifact_tools import ARTIFACT_TOOLS
 from adk_code_mode.output import truncate
-from adk_code_mode.runtime.base import SandboxResult, SandboxBackend, SandboxSession
+from adk_code_mode.runtime.base import SandboxBackend, SandboxResult, SandboxSession
 from adk_code_mode.runtime.protocol import (
     PROTOCOL_VERSION,
     DoneFrame,
@@ -68,10 +68,30 @@ CODE_MODE_SYSTEM_INSTRUCTION = """\
 # How to execute code and use tools
 Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
 The Python Standard Library and a custom set of tools are available to you.
-To see the result of your code, you need to print it. Don't make assumptions about the tool result format.
+To see the result of your code, you need to print it.
+
+For example, if you had the following tool:
+
+```
+from tools.slack import send_message
+
+def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any:
+    \"\"\"Send a message to a Slack channel.\"\"\"
+    ...
+```
+
+To call the tool, you should write:
+
+\"\"\"
+```python
+from tools.slack import send_message
+
+print(send_message(channel="C123", text="hi"))
+```
+\"\"\"
 
 # How to use files and variables in between executions
-Code is executed in a new environment each time. Tool results are automatically saved as Artifacts.
+Code is executed in a new environment each time.
 To list available Artifacts, use the `list_artifacts` tool. To save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
 """
 

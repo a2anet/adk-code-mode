@@ -12,7 +12,7 @@ callback:
 2. Renders the catalog — signatures + docstrings for every tool —
    falling back to a short overflow message when the rendered catalog
    would exceed ``max_catalog_chars``.
-3. Appends ``\\n\\n<tools>\\n…\\n</tools>`` to
+3. Appends ``\\n\\n<code-mode>\\n…\\n</code-mode>`` to
    ``llm_request.config.system_instruction``.
 4. Caches the resolved tools on the executor so the follow-up
    ``execute_code`` call reuses them instead of re-resolving toolsets.
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("adk_code_mode.callback")
 
-_TOOLS_OPEN = "<tools>"
-_TOOLS_CLOSE = "</tools>"
+_TOOLS_OPEN = "<code-mode>"
+_TOOLS_CLOSE = "</code-mode>"
 
 
 def code_mode_before_model_callback(

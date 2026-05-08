@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.1...adk-code-mode-v0.2.2) (2026-05-08)
+
+
+### Bug Fixes
+
+* use `python` fences instead of `tool_code` in `CodeModeCodeExecutor` ([efcc11e](https://github.com/a2anet/adk-code-mode/commit/efcc11e1020c7544223074e00a8649f9c85d4ad6))
+
 ## [0.2.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.0...adk-code-mode-v0.2.1) (2026-05-05)
 
 

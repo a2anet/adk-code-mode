@@ -124,6 +124,14 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
     dict. The empty case is skipped (no call). Hook errors are logged and
     swallowed — they must not break code execution."""
 
+    code_block_delimiters: list[tuple[str, str]] = [
+        ("```python\n", "\n```"),
+        ("```tool_code\n", "\n```"),
+    ]
+    """Prefer ``python`` fences over ``tool_code`` — some Gemini model versions
+    interpret ``tool_code`` as a native function-call marker and return
+    ``MALFORMED_FUNCTION_CALL`` when no tools are declared."""
+
     stateful: bool = Field(default=True, frozen=True, exclude=True)
     optimize_data_file: bool = Field(default=False, frozen=True, exclude=True)
 

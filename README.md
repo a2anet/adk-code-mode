@@ -185,6 +185,8 @@ RemoteBackend(
 
 > **`--vpc-egress=all-traffic` with a deny-all VPC is critical for security.** Without it, user code can make arbitrary outbound requests — including hitting the GCP metadata endpoint (`169.254.169.254`) to steal the service account token, exfiltrating data, or scanning your VPC. The sandbox only needs to _accept_ inbound connections; it never needs outbound access.
 
+> **Configure an HTTP startup probe against `/health`.** Cloud Run's default TCP probe opens a raw socket that the `websockets` server rejects as a malformed HTTP request, which can race with real traffic during cold starts and surface to clients as `HTTP 503` on the WebSocket handshake. Add `--startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=10,periodSeconds=10,failureThreshold=24"` (or equivalent) so probes hit the `/health` endpoint the sandbox handles natively. For reliability under load, also set `--min-instances` to keep warm capacity available.
+
 ### Deploy on other platforms
 
 The same pattern works on any platform that runs Docker containers as HTTP services (AWS Fargate/ECS, Azure Container Instances, Kubernetes, Fly.io, etc.):

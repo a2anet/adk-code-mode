@@ -33,12 +33,19 @@ import socket
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from adk_code_mode.runtime.base import SandboxSession, SandboxResult
-from adk_code_mode.runtime.protocol import Frame, ProtocolError, decode, encode
+from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
+from adk_code_mode.runtime.protocol import (
+    Frame,
+    OutputFrame,
+    ProtocolError,
+    ShutdownFrame,
+    decode,
+    encode,
+)
 
 _CONTAINER_TOOLS_MOUNT = "/tools"
 _CONTAINER_WORKDIR_MOUNT = "/workspace"
@@ -252,53 +259,55 @@ class _DockerSandboxSession(SandboxSession):
         self._lock = asyncio.Lock()
         self._closed = False
 
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        # No-op: /workspace is bind-mounted, so inputs staged on the host are
+        # already visible inside the container.
+        return None
+
     async def send(self, frame: Frame) -> None:
         payload = encode(frame)
         async with self._lock:
             await asyncio.get_running_loop().sock_sendall(self._sock, payload)
 
-    async def frames(self) -> AsyncIterator[Frame]:
+    async def _next_frame(self) -> Frame | None:
+        """Read one control frame off the socket, or ``None`` at EOF.
+
+        ``frames()`` and ``wait()`` share ``_recv_buf`` and are only ever driven
+        sequentially (drain frames to ``DoneFrame``, then read the ``OutputFrame``),
+        so there is never a concurrent reader on the socket.
+        """
         loop = asyncio.get_running_loop()
         while True:
             while b"\n" not in self._recv_buf:
                 chunk = await loop.sock_recv(self._sock, 65536)
                 if not chunk:
-                    return
+                    return None
                 self._recv_buf += chunk
             line, self._recv_buf = self._recv_buf.split(b"\n", 1)
             if not line:
                 continue
             try:
-                yield decode(line)
+                return decode(line)
             except ProtocolError:
                 continue
 
+    async def frames(self) -> AsyncIterator[Frame]:
+        while True:
+            frame = await self._next_frame()
+            if frame is None:
+                return
+            yield frame
+
     async def wait(self) -> SandboxResult:
-        loop = asyncio.get_running_loop()
-
-        def _wait() -> dict[str, Any]:
-            return self._container.wait(timeout=self._timeout) or {}
-
-        try:
-            result = await loop.run_in_executor(None, _wait)
-        except Exception:
-            result = {"StatusCode": -1}
-        exit_code = int(result.get("StatusCode", 0))
-
-        # docker-py's Container.logs() does not support demux, so stdout and stderr
-        # have to be drained separately.
-        def _logs_stdout() -> bytes:
-            return self._container.logs(stdout=True, stderr=False) or b""
-
-        def _logs_stderr() -> bytes:
-            return self._container.logs(stdout=False, stderr=True) or b""
-
-        stdout_b = await loop.run_in_executor(None, _logs_stdout)
-        stderr_b = await loop.run_in_executor(None, _logs_stderr)
+        frame = await self._next_frame()
+        if frame is None:
+            raise SandboxConnectionError("sandbox connection closed before OutputFrame")
+        if not isinstance(frame, OutputFrame):
+            raise RuntimeError(f"expected OutputFrame, got {type(frame).__name__}")
         return SandboxResult(
-            stdout=stdout_b.decode("utf-8", errors="replace"),
-            stderr=stderr_b.decode("utf-8", errors="replace"),
-            exit_code=exit_code,
+            stdout=frame.stdout,
+            stderr=frame.stderr,
+            exit_code=frame.exit_code,
         )
 
     async def close(self) -> None:
@@ -306,6 +315,12 @@ class _DockerSandboxSession(SandboxSession):
             return
         self._closed = True
         loop = asyncio.get_running_loop()
+        # Best-effort graceful shutdown so the container exits its block loop;
+        # the force kill/remove below is the backstop.
+        try:
+            await self.send(ShutdownFrame())
+        except Exception:
+            pass
         try:
             self._sock.close()
         except OSError:

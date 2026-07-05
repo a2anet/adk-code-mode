@@ -14,13 +14,16 @@ are supported, chosen by env var (checked in order):
 - ``ADK_CODE_MODE_CONTROL_FD`` → inherited fd(s). Accepts one fd
   (bidirectional) or two comma-separated fds (read,write).
 
-Installs the RPC client, announces readiness, then waits for a ``run`` frame.
-On receipt, execs the user code with stdout/stderr on the normal streams and
-any ``tools.*`` calls funnelling through the RPC client.
+Installs the RPC client, announces readiness once, then loops handling ``run``
+frames until a ``shutdown`` frame (or disconnect) ends the turn. Each block
+runs against one persistent globals dict (state carries across the turn) with
+its stdout/stderr captured and shipped back in a per-block ``OutputFrame``; any
+``tools.*`` calls funnel through the RPC client.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import socket
 import sys
@@ -31,6 +34,7 @@ from adk_code_mode_sandbox import _rpc_client
 from adk_code_mode_sandbox._rpc_client import RpcClient
 from adk_code_mode_sandbox.protocol import (
     DoneFrame,
+    OutputFrame,
     ReadyFrame,
     RunFrame,
     ShutdownFrame,
@@ -132,9 +136,12 @@ def _make_globals() -> dict[str, Any]:
     }
 
 
-def _run_code(code: str) -> int:
-    """Execute user code. Returns the exit code (0 ok, 1 on exception)."""
-    globs = _make_globals()
+def _exec_into(code: str, globs: dict[str, Any]) -> int:
+    """Execute user code into ``globs``. Returns the exit code (0 ok, 1 on exception).
+
+    ``globs`` is the persistent per-connection globals dict, so names bound by
+    one code block are visible to later blocks in the same turn.
+    """
     try:
         compiled = compile(code, "<code-mode>", "exec")
     except SyntaxError:
@@ -156,6 +163,26 @@ def _run_code(code: str) -> int:
     return 0
 
 
+def run_block(code: str, globs: dict[str, Any]) -> tuple[str, str, int]:
+    """Run one code block with its stdout/stderr captured.
+
+    Redirects ``sys.stdout`` / ``sys.stderr`` to in-memory buffers for the
+    duration of the block so the captured text can be shipped back in an
+    ``OutputFrame`` (both the TCP and HTTP transports emit one per block).
+    """
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    capture_out = io.StringIO()
+    capture_err = io.StringIO()
+    sys.stdout = capture_out
+    sys.stderr = capture_err
+    try:
+        exit_code = _exec_into(code, globs)
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+    return capture_out.getvalue(), capture_err.getvalue(), exit_code
+
+
 def main() -> int:
     if os.environ.get("ADK_CODE_MODE_CONTROL_HTTP"):
         import asyncio
@@ -174,6 +201,9 @@ def main() -> int:
     _prepare_workdir()
     _sanitize_environ()
 
+    # One persistent globals dict + one /workspace for the whole connection, so
+    # variables and files carry across the turn's successive code blocks.
+    globs = _make_globals()
     client.send(ReadyFrame())
 
     while True:
@@ -181,10 +211,9 @@ def main() -> int:
         if isinstance(frame, ShutdownFrame):
             return 0
         if isinstance(frame, RunFrame):
-            exit_code = _run_code(frame.code)
-            sys.stdout.flush()
-            sys.stderr.flush()
+            stdout_text, stderr_text, exit_code = run_block(frame.code, globs)
             client.send(DoneFrame(exit_code=exit_code))
+            client.send(OutputFrame(stdout=stdout_text, stderr=stderr_text, exit_code=exit_code))
             continue
         # Any other frame kind is a host protocol error; keep going but log.
         print(

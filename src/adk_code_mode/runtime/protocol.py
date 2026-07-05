@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 FrameKind = Literal[
@@ -103,7 +103,11 @@ class DoneFrame:
 
 @dataclass(frozen=True)
 class OutputFrame:
-    """Server → host. Captured stdout/stderr after subprocess exit (HTTP mode only)."""
+    """Sandbox → host. Captured stdout/stderr for one executed code block.
+
+    Sent once per block, right after that block's ``DoneFrame``. Under the
+    turn-scoped protocol (v2) a single connection produces one ``OutputFrame``
+    per ``RunFrame`` it handles."""
 
     stdout: str = ""
     stderr: str = ""

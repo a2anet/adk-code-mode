@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -94,6 +94,9 @@ class _FailFirstSendHandle:
     def __init__(self) -> None:
         self.sent: list[Frame] = []
         self._failed = False
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
 
     async def send(self, frame: Frame) -> None:
         if not self._failed:

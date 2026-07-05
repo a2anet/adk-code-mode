@@ -5,6 +5,12 @@
 
 Wires together the normaliser, namespacer, stub renderer, progressive-disclosure
 selector, dispatcher, workspace bridge, runtime, and output truncator.
+
+A sandbox container is held open for the duration of a **turn** (one ADK
+invocation): the first code block connects and uploads the tools, later blocks
+reuse the live session with persistent globals + ``/workspace``, and the
+container is released when the turn ends (``release_invocation``, with an idle
+reaper + ``atexit`` as safety nets).
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from decimal import Decimal
@@ -40,7 +47,12 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from adk_code_mode._artifact_tools import ARTIFACT_TOOLS
 from adk_code_mode.output import truncate
-from adk_code_mode.runtime.base import SandboxBackend, SandboxResult, SandboxSession
+from adk_code_mode.runtime.base import (
+    SandboxBackend,
+    SandboxConnectionError,
+    SandboxResult,
+    SandboxSession,
+)
 from adk_code_mode.runtime.protocol import (
     PROTOCOL_VERSION,
     DoneFrame,
@@ -48,7 +60,6 @@ from adk_code_mode.runtime.protocol import (
     LogFrame,
     ReadyFrame,
     RunFrame,
-    ShutdownFrame,
     ToolCallFrame,
     ToolErrorPayload,
     ToolResultFrame,
@@ -63,6 +74,14 @@ class ProtocolVersionMismatchError(RuntimeError):
 
 
 logger = logging.getLogger("adk_code_mode.executor")
+
+_REAPER_MAX_POLL_SECONDS = 30.0
+
+# Every open turn session is registered here (removed on ``aclose``) so ``atexit``
+# and the test harness can release sandbox containers even if an executor is no
+# longer referenced.
+_LIVE_TURN_SESSIONS: "set[_TurnSession]" = set()
+_LIVE_TURN_SESSIONS_LOCK = threading.Lock()
 
 CODE_MODE_SYSTEM_INSTRUCTION = """\
 # How to execute code and use tools
@@ -91,8 +110,8 @@ print(send_message(channel="C123", text="hi"))
 \"\"\"
 
 # How to use files and variables in between executions
-Code is executed in a new environment each time.
-To list available Artifacts, use the `list_artifacts` tool. To save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
+Within a turn the sandbox is stateful: variables you define and files you write under `/workspace` (the working directory) persist across the successive code blocks you run before replying to the user. They reset at the start of your next turn.
+To carry data across turns, use Artifacts: list them with the `list_artifacts` tool, save with `save_artifact`, and load with `load_artifact`.
 """
 
 
@@ -113,6 +132,10 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
     the per-tool sections and tells the model to navigate ``/tools/`` from
     Python instead."""
     per_tool_timeout_seconds: float | None = None
+    session_idle_timeout_seconds: float = 600
+    """Turn sessions idle longer than this are closed by the background idle
+    reaper. Safety net for turns that never call ``release_invocation`` (errors,
+    missing hook); the primary release is the ``after_agent_callback``."""
     include_artifact_tools: bool = True
     """If true (default), ``save_artifact`` / ``load_artifact`` /
     ``list_artifacts`` are injected at the front of ``tools`` as top-level
@@ -139,6 +162,8 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
     _loop_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _resolution_cache: dict[str, list[normaliser.ResolvedTool]] = PrivateAttr(default_factory=dict)
     _resolution_cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _sessions: dict[str, "_TurnSession"] = PrivateAttr(default_factory=dict)
+    _sessions_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     _ROOT_LOOP_REGISTRY: ClassVar[list["_BackgroundLoop"]] = []
     _RESOLUTION_CACHE_LIMIT: ClassVar[int] = 64
@@ -193,12 +218,28 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         )
         return fut.result()
 
+    def release_invocation(self, invocation_id: str) -> None:
+        """Release the turn's sandbox container as soon as the turn ends.
+
+        Wire this to the agent's ``after_agent_callback`` (with the callback's
+        ``invocation_id``). Pops the cached session and schedules its close onto
+        the background loop the session is bound to — never awaits a loop-bound
+        session from ADK's callback loop. No-op when the invocation had no code.
+        """
+        with self._sessions_lock:
+            turn = self._sessions.pop(invocation_id, None)
+        if turn is not None:
+            self._schedule_close(turn)
+
     def _ensure_background_loop(self) -> asyncio.AbstractEventLoop:
         with self._loop_lock:
             if self._bg_loop is None or not self._bg_loop.is_running:
                 self._bg_loop = _BackgroundLoop()
                 self._bg_loop.start()
                 CodeModeCodeExecutor._ROOT_LOOP_REGISTRY.append(self._bg_loop)
+                # Idle reaper runs as a task on the loop; the loop's ``stop()``
+                # drain cancels it at shutdown.
+                asyncio.run_coroutine_threadsafe(self._reap_idle_sessions(), self._bg_loop.loop)
             return self._bg_loop.loop
 
     async def _aexecute(
@@ -206,8 +247,8 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         invocation_context: InvocationContext,
         code_execution_input: CodeExecutionInput,
     ) -> CodeExecutionResult:
-        session_id = invocation_context.session.id
-        execution_id = code_execution_input.execution_id or session_id
+        invocation_id = invocation_context.invocation_id
+        execution_id = code_execution_input.execution_id or invocation_context.session.id
 
         code = code_execution_input.code
         if self.max_code_chars and len(code) > self.max_code_chars:
@@ -217,59 +258,52 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 output_files=[],
             )
 
-        prepared = await self._prepare_tool_surface(invocation_context)
+        turn = self._get_cached_turn(invocation_id)
+        if turn is None:
+            prepared = await self._prepare_tool_surface(invocation_context)
+            turn = await self._create_turn(invocation_id, prepared)
+        else:
+            prepared = turn.prepared
 
-        run_workspace = _prepare_run_workspace(code_execution_input.input_files)
-
+        turn.mark_in_use()
         try:
-            dispatcher = Dispatcher(
-                invocation_context=invocation_context,
-                registry=prepared.registry,
-                execution_id=execution_id,
-                per_tool_timeout_seconds=self.per_tool_timeout_seconds,
-            )
-
-            session = await self.backend.start(
-                tools_files=prepared.tools_map,
-                workdir_path=run_workspace.root,
-                timeout_seconds=self.timeout_seconds,
-            )
-
-            timed_out = False
             try:
-                run_task = asyncio.create_task(
-                    _run_sandbox(
-                        session=session,
-                        dispatcher=dispatcher,
-                        code=code,
-                    )
-                )
-                result = await asyncio.wait_for(
-                    run_task,
-                    timeout=self.timeout_seconds if self.timeout_seconds else None,
+                result, dispatcher = await self._run_attempt(
+                    turn, invocation_context, code, execution_id, code_execution_input.input_files
                 )
             except asyncio.TimeoutError:
-                timed_out = True
-                result = None
-            finally:
-                await session.close()
+                self._discard_turn(invocation_id, turn)
+                return _timeout_result(self.timeout_seconds)
+            except SandboxConnectionError:
+                # Mid-turn connection loss: drop the dead session, reconnect on a
+                # fresh (cold) container and retry the block once. In-turn state
+                # is lost — documented and acceptable.
+                self._discard_turn(invocation_id, turn)
+                turn = await self._create_turn(invocation_id, prepared)
+                turn.mark_in_use()
+                try:
+                    result, dispatcher = await self._run_attempt(
+                        turn,
+                        invocation_context,
+                        code,
+                        execution_id,
+                        code_execution_input.input_files,
+                    )
+                except asyncio.TimeoutError:
+                    self._discard_turn(invocation_id, turn)
+                    return _timeout_result(self.timeout_seconds)
+                except SandboxConnectionError:
+                    self._discard_turn(invocation_id, turn)
+                    return CodeExecutionResult(
+                        stdout="",
+                        stderr="Sandbox connection lost and could not be re-established.",
+                        output_files=[],
+                    )
 
-            output_files = run_workspace.collect_output_files()
+            output_files = turn.workspace.collect_outputs()
             await self._fire_artifacts_saved(invocation_context, dispatcher.artifact_delta)
 
-            if timed_out or result is None:
-                return CodeExecutionResult(
-                    stdout="",
-                    stderr=(
-                        f"Execution exceeded timeout of {self.timeout_seconds}s and was terminated."
-                        if self.timeout_seconds is not None
-                        else "Execution timed out and was terminated."
-                    ),
-                    output_files=[],
-                )
-
             stderr = _stderr_with_exit_code(result.stderr, result.exit_code)
-
             stdout_res, stderr_res = await asyncio.gather(
                 truncate(
                     result.stdout,
@@ -292,7 +326,100 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 output_files=output_files,
             )
         finally:
-            run_workspace.cleanup()
+            turn.mark_idle()
+
+    async def _run_attempt(
+        self,
+        turn: "_TurnSession",
+        invocation_context: InvocationContext,
+        code: str,
+        execution_id: str,
+        input_files: Sequence[File],
+    ) -> tuple[SandboxResult, Dispatcher]:
+        """Run one code block on ``turn``'s session, bounded by ``timeout_seconds``.
+
+        Stages this block's inputs into the turn workspace first, then drives the
+        per-block contract. Raises ``asyncio.TimeoutError`` on timeout and
+        ``SandboxConnectionError`` if the connection dropped mid-block.
+        """
+        dispatcher = Dispatcher(
+            invocation_context=invocation_context,
+            registry=turn.prepared.registry,
+            execution_id=execution_id,
+            per_tool_timeout_seconds=self.per_tool_timeout_seconds,
+        )
+        input_paths = turn.workspace.stage_inputs(input_files)
+        result = await asyncio.wait_for(
+            _run_block(
+                session=turn.session,
+                dispatcher=dispatcher,
+                code=code,
+                input_paths=input_paths,
+            ),
+            timeout=self.timeout_seconds if self.timeout_seconds else None,
+        )
+        return result, dispatcher
+
+    def _get_cached_turn(self, invocation_id: str) -> "_TurnSession | None":
+        with self._sessions_lock:
+            return self._sessions.get(invocation_id)
+
+    async def _create_turn(
+        self, invocation_id: str, prepared: "_PreparedToolSurface"
+    ) -> "_TurnSession":
+        workspace = _TurnWorkspace.create()
+        try:
+            session = await self.backend.start(
+                tools_files=prepared.tools_map,
+                workdir_path=workspace.root,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except BaseException:
+            workspace.cleanup()
+            raise
+        turn = _TurnSession(
+            session=session,
+            workspace=workspace,
+            prepared=prepared,
+            loop=asyncio.get_running_loop(),
+            last_used=time.monotonic(),
+        )
+        with _LIVE_TURN_SESSIONS_LOCK:
+            _LIVE_TURN_SESSIONS.add(turn)
+        with self._sessions_lock:
+            self._sessions[invocation_id] = turn
+        return turn
+
+    def _discard_turn(self, invocation_id: str, turn: "_TurnSession") -> None:
+        with self._sessions_lock:
+            if self._sessions.get(invocation_id) is turn:
+                del self._sessions[invocation_id]
+        self._schedule_close(turn)
+
+    def _schedule_close(self, turn: "_TurnSession") -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(turn.aclose(), turn.loop)
+        except RuntimeError:
+            # Loop not running (e.g. torn down); nothing more we can safely do.
+            logger.debug("could not schedule turn session close", exc_info=True)
+
+    async def _reap_idle_sessions(self) -> None:
+        interval = max(0.05, min(self.session_idle_timeout_seconds / 2.0, _REAPER_MAX_POLL_SECONDS))
+        while True:
+            await asyncio.sleep(interval)
+            await self._reap_once()
+
+    async def _reap_once(self) -> None:
+        """Close and drop sessions idle longer than ``session_idle_timeout_seconds``."""
+        now = time.monotonic()
+        stale: list[_TurnSession] = []
+        with self._sessions_lock:
+            for invocation_id, turn in list(self._sessions.items()):
+                if turn.in_use == 0 and (now - turn.last_used) > self.session_idle_timeout_seconds:
+                    stale.append(turn)
+                    del self._sessions[invocation_id]
+        for turn in stale:
+            await turn.aclose()
 
     async def _fire_artifacts_saved(
         self, invocation_context: InvocationContext, delta: dict[str, int]
@@ -359,22 +486,55 @@ class _PreparedToolSurface:
 
 
 @dataclasses.dataclass
-class _RunWorkspace:
+class _TurnWorkspace:
+    """One host workspace directory held for the whole turn.
+
+    ``baseline_hashes`` is the rolling per-path content snapshot: staged inputs
+    are folded in (so they aren't misreported as outputs), and it is advanced to
+    the post-block state after each ``collect_outputs`` so the next block only
+    reports what *it* changed.
+    """
+
     root: str
-    initial_hashes: dict[str, str]
+    baseline_hashes: dict[str, str]
+
+    @classmethod
+    def create(cls) -> "_TurnWorkspace":
+        return cls(root=tempfile.mkdtemp(prefix="adk-code-mode-turn-"), baseline_hashes={})
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def collect_output_files(self) -> list[File]:
+    def stage_inputs(self, input_files: Sequence[File]) -> list[str]:
+        """Write this block's inputs into the workspace; return their rel paths."""
+        staged: list[str] = []
+        seen: set[str] = set()
+        for file in input_files:
+            rel_path = _normalise_workspace_rel_path(file.name)
+            if rel_path in seen:
+                raise ValueError(f"duplicate input file name {file.name!r}")
+            seen.add(rel_path)
+            abs_path = os.path.join(self.root, rel_path)
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            data = _input_file_bytes(file)
+            with open(abs_path, "wb") as fh:
+                fh.write(data)
+            self.baseline_hashes[rel_path] = hash_bytes(data)
+            staged.append(rel_path)
+        return staged
+
+    def collect_outputs(self) -> list[File]:
+        """Files whose content differs from the rolling baseline; then advance it."""
         files: list[File] = []
+        current: dict[str, str] = {}
         for rel_path in walk_workspace(self.root):
             abs_path = os.path.join(self.root, rel_path)
             try:
                 digest, _size = hash_file(abs_path)
             except OSError:
                 continue
-            if self.initial_hashes.get(rel_path) == digest:
+            current[rel_path] = digest
+            if self.baseline_hashes.get(rel_path) == digest:
                 continue
             with open(abs_path, "rb") as fh:
                 data = fh.read()
@@ -386,25 +546,41 @@ class _RunWorkspace:
                     mime_type=mime_type or "application/octet-stream",
                 )
             )
+        self.baseline_hashes = current
         return files
 
 
-def _prepare_run_workspace(input_files: Sequence[File]) -> _RunWorkspace:
-    root = tempfile.mkdtemp(prefix="adk-code-mode-run-")
-    seen_paths: set[str] = set()
-    initial_hashes: dict[str, str] = {}
-    for file in input_files:
-        rel_path = _normalise_workspace_rel_path(file.name)
-        if rel_path in seen_paths:
-            raise ValueError(f"duplicate input file name {file.name!r}")
-        seen_paths.add(rel_path)
-        abs_path = os.path.join(root, rel_path)
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        data = _input_file_bytes(file)
-        with open(abs_path, "wb") as fh:
-            fh.write(data)
-        initial_hashes[rel_path] = hash_bytes(data)
-    return _RunWorkspace(root=root, initial_hashes=initial_hashes)
+@dataclasses.dataclass(eq=False)
+class _TurnSession:
+    """A live sandbox session bound to one invocation (turn).
+
+    ``eq=False`` keeps identity-based equality/hashing so instances can live in
+    the ``_LIVE_TURN_SESSIONS`` set and be matched with ``is``.
+    """
+
+    session: SandboxSession
+    workspace: _TurnWorkspace
+    prepared: _PreparedToolSurface
+    loop: asyncio.AbstractEventLoop
+    last_used: float
+    in_use: int = 0
+
+    def mark_in_use(self) -> None:
+        self.in_use += 1
+        self.last_used = time.monotonic()
+
+    def mark_idle(self) -> None:
+        self.in_use = max(0, self.in_use - 1)
+        self.last_used = time.monotonic()
+
+    async def aclose(self) -> None:
+        with _LIVE_TURN_SESSIONS_LOCK:
+            _LIVE_TURN_SESSIONS.discard(self)
+        try:
+            await self.session.close()
+        except Exception:
+            logger.debug("error closing turn session", exc_info=True)
+        self.workspace.cleanup()
 
 
 def _normalise_workspace_rel_path(raw_path: str) -> str:
@@ -424,6 +600,18 @@ def _input_file_bytes(file: File) -> bytes:
     return base64.b64decode(file.content)
 
 
+def _timeout_result(timeout_seconds: int | None) -> CodeExecutionResult:
+    return CodeExecutionResult(
+        stdout="",
+        stderr=(
+            f"Execution exceeded timeout of {timeout_seconds}s and was terminated."
+            if timeout_seconds is not None
+            else "Execution timed out and was terminated."
+        ),
+        output_files=[],
+    )
+
+
 def _stderr_with_exit_code(stderr: str, exit_code: int) -> str:
     if exit_code == 0:
         return stderr
@@ -433,12 +621,20 @@ def _stderr_with_exit_code(stderr: str, exit_code: int) -> str:
     return f"{stderr.rstrip()}\n{marker}"
 
 
-async def _run_sandbox(
+async def _run_block(
     *,
     session: SandboxSession,
     dispatcher: Dispatcher,
     code: str,
+    input_paths: Sequence[str],
 ) -> SandboxResult:
+    """Run one code block on an already-open session (no connect, no shutdown).
+
+    Per-block contract: stage inputs → send ``RunFrame`` → drain frames until
+    ``DoneFrame`` → read the block's ``OutputFrame``. ``ShutdownFrame`` is *not*
+    sent here — it belongs to ``session.close()`` at turn end.
+    """
+    await session.begin_block(input_paths)
     host_loop = asyncio.create_task(_host_loop(session=session, dispatcher=dispatcher))
     done_exit_code: int | None = None
     try:
@@ -448,10 +644,6 @@ async def _run_sandbox(
         if not host_loop.done():
             host_loop.cancel()
             await asyncio.gather(host_loop, return_exceptions=True)
-    try:
-        await session.send(ShutdownFrame())
-    except Exception:
-        pass
     result = await session.wait()
     if done_exit_code is None:
         return result
@@ -635,8 +827,27 @@ class _BackgroundLoop:
             pass
 
 
+def _close_live_sessions_blocking() -> None:
+    """Schedule every open turn session's close onto its loop and wait briefly."""
+    with _LIVE_TURN_SESSIONS_LOCK:
+        turns = list(_LIVE_TURN_SESSIONS)
+    futures = []
+    for turn in turns:
+        try:
+            futures.append(asyncio.run_coroutine_threadsafe(turn.aclose(), turn.loop))
+        except RuntimeError:
+            pass
+    for fut in futures:
+        try:
+            fut.result(timeout=5.0)
+        except Exception:
+            pass
+
+
 @atexit.register
 def _stop_background_loops() -> None:
+    # Close sandbox containers before tearing down the loops they run on.
+    _close_live_sessions_blocking()
     for loop in CodeModeCodeExecutor._ROOT_LOOP_REGISTRY:
         try:
             loop.stop()

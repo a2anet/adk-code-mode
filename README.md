@@ -15,14 +15,14 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 - **Bake any Python package into the image** — extend the published base image with anything the model's code needs to `import`, no runtime `pip install` required.
 - **Cross-turn persistence via ADK Artifacts** — `save_artifact` / `load_artifact` / `list_artifacts` are auto-injected and route through your configured `ArtifactService`.
 - **Bounded stdout/stderr** — overflow lands in a session artifact instead of poisoning the prompt.
-- **Production-ready remote sandbox** — `RemoteBackend` connects to an isolated, single-use container over WebSocket. Deploy on any cloud platform (Cloud Run, Fargate, ACI, Kubernetes, Fly.io, etc.).
+- **Production-ready remote sandbox** — `RemoteBackend` connects to an isolated per-turn container over WebSocket, reused across the turn's code blocks. Deploy on any cloud platform (Cloud Run, Fargate, ACI, Kubernetes, Fly.io, etc.).
 - **Local development** — `UnsafeLocalDockerBackend` runs the sandbox against your local Docker daemon for fast iteration. **Not for production** — see [Safety](#-safety).
 
 |                                     | BuiltIn | AgentEngineSandbox              | VertexAi                        | Container | Gke | CodeMode                 |
 | ----------------------------------- | ------- | ------------------------------- | ------------------------------- | --------- | --- | ------------------------ |
 | Call ADK tools from code            | no      | no                              | no                              | no        | no  | yes (with limitations)   |
 | Extra Python packages               | no      | no (more than stdlib but fixed) | no (more than stdlib but fixed) | yes       | yes | yes                      |
-| Variables are stateful              | no      | yes                             | yes                             | no        | no  | no                       |
+| Variables are stateful              | no      | yes                             | yes                             | no        | no  | yes (within a turn)      |
 | Input files                         | no      | yes                             | yes                             | no        | no  | yes                      |
 | Output files                        | no      | yes                             | yes                             | no        | no  | yes                      |
 | Storage                             | no      | yes (via variables)             | yes (via variables)             | no        | no  | yes (via ADK Artifacts)  |
@@ -119,17 +119,16 @@ print(send_message(channel="C123", text="hi"))
 
 ## 🌐 Remote Deployment
 
-**Every execution runs in its own container.** The container accepts exactly one WebSocket connection, executes the user's code, returns results, and exits. The hosting platform destroys the container after each request — no cross-tenant data leakage, no residual state. You **must** configure your platform for one container per request (`--concurrency 1` on Cloud Run, or equivalent).
+**Every turn runs in its own container.** The container accepts exactly one WebSocket connection and holds it open for the whole turn, executing **one or more** code blocks with persistent globals + `/workspace`, then exits when the turn ends (`ShutdownFrame` or disconnect). The hosting platform destroys the container after each turn — no cross-turn or cross-tenant data leakage, no residual state. You **must** configure your platform for one container per turn (`--concurrency 1` on Cloud Run, or equivalent).
 
 Setting `ADK_CODE_MODE_CONTROL_HTTP=1` activates HTTP mode. The container:
 
 1. Starts a WebSocket server on port 8080 (configurable via `PORT`)
 2. Accepts exactly one connection (rejects further connections with 503)
-3. Receives tools and workspace as tar archives over binary WebSocket frames
+3. Receives the tools tar **once**, then announces readiness
 4. Sanitizes the environment (strips all env vars except a safe allowlist)
-5. Executes user code with tools proxied back to the host over the same WebSocket
-6. Returns stdout/stderr and updated workspace files
-7. Exits
+5. For each code block: receives that block's workspace tar, executes user code (tools proxied back to the host over the same WebSocket; globals + `/workspace` persist across blocks), then returns stdout/stderr and the updated workspace
+6. Exits when the turn ends (`ShutdownFrame` or disconnect)
 
 ### Deploy to Cloud Run
 
@@ -165,12 +164,16 @@ gcloud run deploy adk-code-mode-sandbox \
     --cpu 1 \
     --memory 1Gi \
     --concurrency 1 \
+    --timeout 3600 \
+    --max-instances 120 \
     --allow-unauthenticated \
     --vpc-connector=adk-sandbox-connector \
     --vpc-egress=all-traffic \
     --set-env-vars "ADK_CODE_MODE_CONTROL_HTTP=1" \
     --set-secrets "ADK_CODE_MODE_AUTH_TOKEN=<your-secret-name>:latest"
 ```
+
+> These flags are **recommendations to tune per deployment**, not hard requirements. `--timeout 3600` (Cloud Run's max) is the per-turn ceiling since the container holds the WebSocket for the whole turn; `--max-instances` should cover your peak concurrent *turns* (`120` covers a 10–100 target — verify your region's Cloud Run vCPU quota). Also add the `/health` startup probe below.
 
 Then in your agent:
 
@@ -181,17 +184,17 @@ RemoteBackend(
 )
 ```
 
-> **`--concurrency 1` is critical for security.** Without this flag, Cloud Run may route multiple requests to the same container. The sandbox rejects the second connection, but the misconfiguration itself is a risk.
+> **`--concurrency 1` is critical for security.** It pins one turn to one container. Without this flag, Cloud Run may route multiple turns to the same container. The sandbox rejects the second connection, but the misconfiguration itself is a risk.
 
 > **`--vpc-egress=all-traffic` with a deny-all VPC is critical for security.** Without it, user code can make arbitrary outbound requests — including hitting the GCP metadata endpoint (`169.254.169.254`) to steal the service account token, exfiltrating data, or scanning your VPC. The sandbox only needs to _accept_ inbound connections; it never needs outbound access.
 
-> **Configure an HTTP startup probe against `/health`.** Cloud Run's default TCP probe opens a raw socket that the `websockets` server rejects as a malformed HTTP request, which can race with real traffic during cold starts and surface to clients as `HTTP 503` on the WebSocket handshake. Add `--startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=3,periodSeconds=3,failureThreshold=80"` (or equivalent) so probes hit the `/health` endpoint the sandbox handles natively. Keep `periodSeconds` small (e.g. `3`): it sets how long Cloud Run waits before re-probing, so a short period lets a ready container start serving in ~3s instead of ~10s — raise `failureThreshold` to keep the same overall startup budget (`periodSeconds × failureThreshold`). For reliability under load, also set `--min-instances` to keep warm capacity available.
+> **Configure an HTTP startup probe against `/health`.** Cloud Run's default TCP probe opens a raw socket that the `websockets` server rejects as a malformed HTTP request, which can race with real traffic during cold starts and surface to clients as `HTTP 503` on the WebSocket handshake. Add `--startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=3,periodSeconds=3,failureThreshold=80"` (or equivalent) so probes hit the `/health` endpoint the sandbox handles natively. Keep `periodSeconds` small (e.g. `3`): it sets how long Cloud Run waits before re-probing, so a short period lets a ready container start serving in ~3s instead of ~10s — raise `failureThreshold` to keep the same overall startup budget (`periodSeconds × failureThreshold`). Turn-scoping already gives demand-driven warmth (a container stays up for the whole turn), so `--min-instances=0` is fine; only set `--min-instances` if you want to eliminate cold starts at the cost of a paid warm pool.
 
 ### Deploy on other platforms
 
 The same pattern works on any platform that runs Docker containers as HTTP services (AWS Fargate/ECS, Azure Container Instances, Kubernetes, Fly.io, etc.):
 
-1. **One container per request.** Each container handles exactly one execution and exits.
+1. **One container per turn.** Each container handles exactly one turn (one or more code blocks) and exits.
 2. **Block all outbound network access.** Without egress restrictions, user code can exfiltrate data, access cloud metadata endpoints, or scan internal networks.
 3. **Set a read-only root filesystem** where the platform supports it (e.g., `readOnlyRootFilesystem: true` in Kubernetes). The sandbox only writes to `/workspace`.
 4. **Authenticate connections.** Set `ADK_CODE_MODE_AUTH_TOKEN` and layer platform-level auth (IAM, NetworkPolicy, security groups) on top.
@@ -206,23 +209,29 @@ Required env vars:
 | `ADK_CODE_MODE_MAX_UPLOAD_TOOLS`     | no       | 100 MiB | Max tools tar archive size       |
 | `ADK_CODE_MODE_MAX_UPLOAD_WORKSPACE` | no       | 100 MiB | Max workspace tar archive size   |
 
-The same upload limits (plus a download limit) are configurable on `RemoteBackend`:
+Connection tuning, retry, and the same upload limits (plus a download limit) are configurable on `RemoteBackend`:
 
 ```python
 RemoteBackend(
     url="...",
     token="...",
+    connect_timeout=10.0,             # seconds to wait for the WS handshake (default)
+    start_attempts=3,                 # connect attempts before giving up (default)
+    start_retry_delay_seconds=1.0,    # linear backoff base: delay * attempt (default)
+    start_retry_jitter_seconds=0.25,  # uniform jitter added per retry (default)
     max_upload_tools_bytes=100 * 1024 * 1024,       # 100 MiB (default)
     max_upload_workspace_bytes=100 * 1024 * 1024,    # 100 MiB (default)
     max_download_workspace_bytes=100 * 1024 * 1024,  # 100 MiB (default)
 )
 ```
 
+`connect_timeout` defaults to `10s` — fail a stalled connect fast and retry rather than block. `RemoteBackend` retries transient connect failures up to `start_attempts` times with linear backoff + jitter; raise `connect_timeout` (and/or `start_attempts`) for platforms with slow cold starts.
+
 ## 🗂️ Storage
 
 Code Mode exposes two file surfaces:
 
-- **`/workspace`** — per-run working directory. ADK `input_files` are staged here before code runs (`open("input.csv")` works). Files created or modified under `/workspace` are returned as `CodeExecutionResult.output_files` but are not re-hydrated next turn unless persisted via `save_artifact`.
+- **`/workspace`** — the turn's working directory. It persists across the turn's code blocks and resets between turns. ADK `input_files` for a block are staged here before that block runs (`open("input.csv")` works). Files whose content changed in a block are returned as that block's `CodeExecutionResult.output_files`; nothing under `/workspace` is re-hydrated on the next turn unless persisted via `save_artifact`.
 
 - **ADK Artifacts** — persistent cross-turn storage. `CodeModeCodeExecutor` injects three tools into the catalog:
 
@@ -299,9 +308,32 @@ CodeModeCodeExecutor(
 )
 ```
 
+`timeout_seconds` / `per_tool_timeout_seconds` stay `None` by default; with turn-scoping the effective per-turn wall-clock ceiling is the platform request timeout (e.g. Cloud Run `--timeout`).
+
+### Turn-scoped sessions
+
+A sandbox container is held open for the duration of a **turn** (one ADK invocation) and reused across that turn's code blocks, so cold start is paid at most once per turn instead of once per block. State — Python globals **and** `/workspace` — persists across a turn's blocks and resets between turns (use ADK Artifacts for cross-turn persistence).
+
+The container is released when the turn ends. Wire `code_executor.release_invocation(callback_context.invocation_id)` into your agent's `after_agent_callback` to free it the moment the turn finishes:
+
+```python
+def _release(callback_context):
+    code_executor.release_invocation(callback_context.invocation_id)
+
+agent = LlmAgent(..., after_agent_callback=[_release])
+```
+
+Two safety nets cover turns that never signal a clean end: an idle reaper closes sessions idle longer than `session_idle_timeout_seconds` (default `600`), and a mid-turn connection loss (or a `timeout_seconds` firing) drops the session so the next block reconnects on a fresh container — in-turn state is lost, which is acceptable and rare.
+
+```python
+CodeModeCodeExecutor(tools=..., backend=..., session_idle_timeout_seconds=600)
+```
+
+> Turn-scoping is wire-protocol **v2**. The host wheel and the sandbox image must be upgraded together — a version mismatch fails fast with `ProtocolVersionMismatchError` — so rebuild and push the sandbox image when you upgrade.
+
 ## 🏗️ Architecture
 
-**Host wheel (`adk-code-mode`).** Lives in the same process as your `LlmAgent`. The `before_model_callback` resolves tools, renders the catalog, and appends it to the system prompt. At execution time, it generates a `tools/` Python package of thin stubs, stages `input_files` into `/workspace`, and launches the sandbox.
+**Host wheel (`adk-code-mode`).** Lives in the same process as your `LlmAgent`. The `before_model_callback` resolves tools, renders the catalog, and appends it to the system prompt. At execution time, it generates a `tools/` Python package of thin stubs, stages the block's `input_files` into `/workspace`, and opens (or reuses) the turn's sandbox connection — the container spans the whole turn.
 
 **Sandbox wheel (`adk-code-mode-sandbox`).** Pre-installed in the container image. When model code calls a stub, it sends a JSON-Lines frame over the control connection; the host runs the real tool (with callbacks and plugins) and sends the result back.
 
@@ -345,8 +377,8 @@ print(send_message(channel="C123", text="hi"))
 """
 
 # How to use files and variables in between executions
-Code is executed in a new environment each time.
-To list available Artifacts, use the `list_artifacts` tool. To save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
+Within a turn the sandbox is stateful: variables you define and files you write under `/workspace` (the working directory) persist across the successive code blocks you run before replying to the user. They reset at the start of your next turn.
+To carry data across turns, use Artifacts: list them with the `list_artifacts` tool, save with `save_artifact`, and load with `load_artifact`.
 
 <code-mode>
 
@@ -391,7 +423,7 @@ Text and JSON-like MIME types travel as plain strings in artifact tools; binary 
 
 `RemoteBackend` is designed for multi-tenant production use where untrusted users submit arbitrary Python code:
 
-- **One container per execution.** Fresh container per request — no shared filesystem, memory, or processes.
+- **One container per turn (one tenant, one invocation).** Within a turn the process/filesystem are reused across that turn's code blocks; the container is destroyed at turn end, with **no cross-turn or cross-tenant sharing**.
 - **Environment sanitization.** All env vars are stripped except a safe allowlist (`PATH`, `HOME`, `USER`, locale vars, Python config) before user code runs.
 - **Credentials never enter the sandbox.** API keys, OAuth tokens, and connection strings stay in the host process. The container only receives tool results.
 - **Bearer token authentication.** WebSocket connections without a valid token are rejected. Always set `ADK_CODE_MODE_AUTH_TOKEN` and layer platform-level auth on top.
@@ -416,7 +448,7 @@ Named "Unsafe" intentionally: it binds a TCP listener on `0.0.0.0`, communicates
 ## ⚠️ Limitations
 
 - **No credential-requesting tools.** Tools that need ADK to request credentials, confirmations, UI widgets, agent transfer, escalation, or that yield without an immediate response are rejected with a structured error.
-- **No state across executions.** Variables don't survive between turns. Use `save_artifact` / `load_artifact` to persist, or `/workspace` within a single run.
+- **State is turn-scoped.** Variables and `/workspace` files persist across code blocks **within** a turn, but reset between turns. Use `save_artifact` / `load_artifact` to persist across turns.
 - **No runtime package installation.** The sandbox ships with the Python Standard Library and the runtime's own dependencies only. Extra packages must be baked into the image at build time.
 
 ## 🛠️ Development

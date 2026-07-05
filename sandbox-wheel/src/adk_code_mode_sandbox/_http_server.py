@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2025-present A2A Net <hello@a2anet.com>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""HTTP/WebSocket server mode for the sandbox (single-use).
+"""HTTP/WebSocket server mode for the sandbox (one connection per turn).
 
 Activated by ``ADK_CODE_MODE_CONTROL_HTTP=1``. The container accepts exactly
-one WebSocket connection, executes user code in-process, then exits. The
-hosting platform (Cloud Run, Fargate, K8s, etc.) is expected to create a new
-container for each request.
+one WebSocket connection and holds it open for the whole turn, executing one or
+more code blocks in-process with a persistent globals dict and ``/workspace``,
+then exits when the turn ends (``ShutdownFrame`` or disconnect). The hosting
+platform (Cloud Run, Fargate, K8s, etc.) creates a new container per turn.
 
 Files (tools and workspace) are transferred as tar archives over binary
 WebSocket frames; control frames use the standard JSON-lines protocol
@@ -14,11 +15,16 @@ over text WebSocket frames.
 
 Connection protocol::
 
-    1. Client sends binary: tools tar.gz
-    2. Client sends binary: workspace tar.gz
-    3. Bidirectional text frames: JSON-lines control protocol
-    4. After code execution, server sends text: OutputFrame
-    5. Server sends binary: workspace tar.gz (updated files)
+    1. Client sends binary: tools tar.gz   (once)
+    2. Server sends text:   ReadyFrame      (once)
+    3. Per code block, in fixed frame order:
+         a. Client sends binary: workspace tar.gz (this block's inputs; may be empty)
+         b. Client sends text:   RunFrame
+         c. Bidirectional text frames: JSON-lines tool-call protocol
+         d. Server sends text:   DoneFrame
+         e. Server sends text:   OutputFrame
+         f. Server sends binary: workspace tar.gz (updated files)
+    4. Client sends text: ShutdownFrame (or disconnects) to end the turn.
 """
 
 from __future__ import annotations
@@ -29,7 +35,6 @@ import logging
 import os
 import queue as queue_mod
 import shutil
-import sys
 import tarfile
 import tempfile
 from http import HTTPStatus
@@ -39,18 +44,22 @@ import websockets
 import websockets.asyncio.server
 
 from adk_code_mode_sandbox._entry import (
+    _make_globals,
     _prepare_sys_path,
     _prepare_workdir,
-    _run_code,
     _sanitize_environ,
+    run_block,
 )
 from adk_code_mode_sandbox._rpc_client import RpcClient
 from adk_code_mode_sandbox import _rpc_client
 from adk_code_mode_sandbox.protocol import (
     DoneFrame,
     OutputFrame,
+    ProtocolError,
     ReadyFrame,
     RunFrame,
+    ShutdownFrame,
+    decode,
     encode,
 )
 
@@ -156,7 +165,7 @@ async def _handle_connection(ws: Any) -> None:
     workspace_dir = tempfile.mkdtemp(prefix="adk-cm-ws-")
 
     try:
-        # 1. Receive and extract tools tar
+        # 1. Receive and extract the tools tar (once for the whole connection).
         tools_data = await ws.recv()
         if not isinstance(tools_data, (bytes, bytearray)):
             raise ValueError("expected binary frame for tools tar")
@@ -166,83 +175,107 @@ async def _handle_connection(ws: Any) -> None:
             )
         _extract_tar(tools_data, tools_dir)
 
-        # 2. Receive and extract workspace tar
-        ws_data = await ws.recv()
-        if not isinstance(ws_data, (bytes, bytearray)):
-            raise ValueError("expected binary frame for workspace tar")
-        if len(ws_data) > max_workspace:
-            raise ValueError(
-                f"workspace archive ({len(ws_data):,} bytes) exceeds limit ({max_workspace:,} bytes)"
-            )
-        _extract_tar(ws_data, workspace_dir)
-
-        # 3. Sanitize environment before user code can read it
+        # 2. Sanitize environment, then prepare sys.path + a persistent /workspace.
         _sanitize_environ()
-
-        # 4. Prepare sandbox (sys.path, workdir)
         _prepare_sys_path(tools_dir)
         _prepare_workdir(workspace_dir)
 
-        # 5. Set up async↔sync bridge and install RPC client
+        # 3. One persistent globals dict for the connection, so variables set in
+        #    one block are visible to later blocks in the same turn.
+        globs = _make_globals()
         loop = asyncio.get_running_loop()
-        bridge_reader = _WsBridgeReader()
-        bridge_writer = _WsBridgeWriter(loop, ws)
-        client = RpcClient(reader=bridge_reader, writer=bridge_writer)
-        _rpc_client.install(client)
 
-        # 6. Run user code on a worker thread while pumping WS messages
-        pump_task = asyncio.create_task(_pump_ws_to_reader(ws, bridge_reader))
+        # 4. Announce readiness once (carries the protocol version).
+        await ws.send(encode(ReadyFrame()).decode("utf-8"))
 
-        stdout_text, stderr_text, exit_code = await loop.run_in_executor(
-            None, _run_user_code, client
+        # 5. Run code blocks until the client ends the turn or disconnects.
+        while await _run_one_block(ws, loop, globs, workspace_dir, max_workspace):
+            pass
+    finally:
+        shutil.rmtree(tools_base, ignore_errors=True)
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+
+async def _run_one_block(
+    ws: Any,
+    loop: asyncio.AbstractEventLoop,
+    globs: dict[str, Any],
+    workspace_dir: str,
+    max_workspace: int,
+) -> bool:
+    """Handle one code block. Returns ``False`` when the turn should end.
+
+    The per-block frame order is fixed — the binary workspace tar first, then
+    the text ``RunFrame`` — which is what keeps the WebSocket from desyncing
+    across blocks.
+    """
+    # a. This block's workspace tar (binary), or a control frame ending the turn.
+    try:
+        first = await ws.recv()
+    except websockets.ConnectionClosed:
+        return False
+    if isinstance(first, str):
+        try:
+            frame = decode(first)
+        except ProtocolError:
+            return True
+        if isinstance(frame, ShutdownFrame):
+            return False
+        return True  # unexpected control frame between blocks; ignore
+    if len(first) > max_workspace:
+        raise ValueError(
+            f"workspace archive ({len(first):,} bytes) exceeds limit ({max_workspace:,} bytes)"
         )
+    _extract_tar(first, workspace_dir)
 
+    # b. The RunFrame (text).
+    run_msg = await ws.recv()
+    if not isinstance(run_msg, str):
+        raise ValueError("expected text frame for RunFrame")
+    run_frame = decode(run_msg)
+    if not isinstance(run_frame, RunFrame):
+        raise ValueError(f"expected RunFrame, got {type(run_frame).__name__}")
+
+    # c. Run user code on a worker thread while pumping incoming text frames
+    #    (tool results) into the RPC bridge. A fresh bridge/client per block
+    #    keeps the reader-thread lifecycle simple; the globals dict persists.
+    bridge_reader = _WsBridgeReader()
+    bridge_writer = _WsBridgeWriter(loop, ws)
+    client = RpcClient(reader=bridge_reader, writer=bridge_writer)
+    _rpc_client.install(client)
+    pump_task = asyncio.create_task(_pump_ws_to_reader(ws, bridge_reader))
+    try:
+        stdout_text, stderr_text, exit_code = await loop.run_in_executor(
+            None, run_block, run_frame.code, globs
+        )
+    finally:
         pump_task.cancel()
         try:
             await pump_task
         except asyncio.CancelledError:
             pass
 
-        # 7. Send OutputFrame + updated workspace tar
-        output = OutputFrame(
-            stdout=stdout_text,
-            stderr=stderr_text,
-            exit_code=exit_code,
+    # d-f. DoneFrame, OutputFrame, then the updated workspace tar (binary).
+    await ws.send(encode(DoneFrame(exit_code=exit_code)).decode("utf-8"))
+    await ws.send(
+        encode(OutputFrame(stdout=stdout_text, stderr=stderr_text, exit_code=exit_code)).decode(
+            "utf-8"
         )
-        await ws.send(encode(output).decode("utf-8"))
-        await ws.send(_create_tar(workspace_dir))
-
-    finally:
-        shutil.rmtree(tools_base, ignore_errors=True)
-        shutil.rmtree(workspace_dir, ignore_errors=True)
-
-
-def _run_user_code(client: RpcClient) -> tuple[str, str, int]:
-    """Execute one RunFrame's code. Runs on a worker thread."""
-    client.send(ReadyFrame())
-    frame = client.recv()
-    if not isinstance(frame, RunFrame):
-        return ("", f"expected RunFrame, got {type(frame).__name__}", 1)
-
-    old_stdout, old_stderr = sys.stdout, sys.stderr
-    capture_out = io.StringIO()
-    capture_err = io.StringIO()
-    sys.stdout = capture_out
-    sys.stderr = capture_err
-    try:
-        exit_code = _run_code(frame.code)
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-    client.send(DoneFrame(exit_code=exit_code))
-    return (capture_out.getvalue(), capture_err.getvalue(), exit_code)
+    )
+    await ws.send(_create_tar(workspace_dir))
+    return True
 
 
 async def _pump_ws_to_reader(ws: Any, reader: _WsBridgeReader) -> None:
-    """Forward incoming WS text frames to the bridge reader queue."""
+    """Forward incoming WS text frames (tool results) to the bridge reader queue.
+
+    Runs only while a block executes. Uses an explicit ``recv()`` loop (rather
+    than ``async for``) so it can be cancelled and a fresh pump started for the
+    next block. Binary frames are not expected mid-block and are ignored.
+    """
     try:
-        async for msg in ws:
+        while True:
+            msg = await ws.recv()
             if isinstance(msg, str):
                 data = msg.encode("utf-8")
                 if not data.endswith(b"\n"):

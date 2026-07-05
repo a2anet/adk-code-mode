@@ -9,6 +9,7 @@ exercises the full execution path through ``RemoteBackend``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
@@ -19,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import websockets.exceptions
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.code_executors.code_execution_utils import CodeExecutionInput
@@ -197,3 +199,97 @@ async def test_remote_workspace_files(http_server: subprocess.Popen[bytes]) -> N
     )
     assert "wrote file" in result.stdout
     assert any(f.name == "output.txt" for f in result.output_files)
+
+
+@pytest.mark.asyncio
+async def test_remote_variables_and_workspace_persist_across_blocks(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    """Two blocks of one turn share the same container (one connection)."""
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id="remote-multi",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(artifact_service, session)  # shared invocation_id => one turn
+
+    executor = CodeModeCodeExecutor(
+        tools=[],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+    )
+
+    await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="x = 10\nopen('kept.txt', 'w').write('carried')\n",
+            execution_id="remote-multi-1",
+        ),
+    )
+    result = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="print('x*4', x * 4)\nprint('file', open('kept.txt').read())\n",
+            execution_id="remote-multi-2",
+        ),
+    )
+
+    assert "x*4 40" in result.stdout
+    assert "file carried" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_remote_second_connection_is_rejected(
+    http_server: subprocess.Popen[bytes], tmp_path: Path
+) -> None:
+    """While one turn holds the connection, a second connect gets rejected."""
+    backend = RemoteBackend(url=_server_url(http_server), start_attempts=1)
+    w1 = tmp_path / "w1"
+    w1.mkdir()
+    session1 = await backend.start(tools_files={}, workdir_path=str(w1), timeout_seconds=None)
+    try:
+        w2 = tmp_path / "w2"
+        w2.mkdir()
+        with pytest.raises(websockets.exceptions.WebSocketException):
+            await backend.start(tools_files={}, workdir_path=str(w2), timeout_seconds=None)
+    finally:
+        await session1.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_close_shuts_the_container_down(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    """Releasing the turn (ShutdownFrame) makes the single-use server exit."""
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id="remote-shutdown",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(artifact_service, session)
+
+    executor = CodeModeCodeExecutor(
+        tools=[],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+    )
+    await executor._aexecute(
+        ctx, CodeExecutionInput(code="print('ready')\n", execution_id="remote-shutdown-1")
+    )
+
+    assert http_server.poll() is None  # still serving the turn
+    executor.release_invocation(ctx.invocation_id)
+
+    for _ in range(200):
+        if http_server.poll() is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert http_server.poll() is not None  # container exited after ShutdownFrame

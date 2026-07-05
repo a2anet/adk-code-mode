@@ -9,22 +9,42 @@ as :class:`UnsafeLocalDockerBackend` but in HTTP mode (activated by
 
 Works with any platform that hosts Docker containers as HTTP services:
 Cloud Run, Fargate, ACI, Kubernetes, Fly.io, etc.
+
+One connection is held open for the whole turn: ``start`` connects and uploads
+the tools once, each block uploads its own inputs and downloads the updated
+``/workspace``, and ``close`` sends a ``ShutdownFrame`` to release the container.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import random
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 import websockets
 import websockets.asyncio.client
 
-from adk_code_mode.runtime.base import SandboxResult, SandboxSession
-from adk_code_mode.runtime.protocol import Frame, OutputFrame, ProtocolError, decode, encode
+from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
+from adk_code_mode.runtime.protocol import (
+    Frame,
+    OutputFrame,
+    ProtocolError,
+    ShutdownFrame,
+    decode,
+    encode,
+)
+
+
+def _is_retryable_connect_error(exc: BaseException) -> bool:
+    """Transient connect failures worth retrying (slow cold start, reset, etc.)."""
+    if isinstance(exc, (ConnectionError, EOFError, OSError, TimeoutError)):
+        return True
+    return type(exc).__module__.startswith("websockets")
 
 
 @dataclass
@@ -35,12 +55,21 @@ class RemoteBackend:
         url: Base URL of the sandbox HTTP server, e.g.
             ``"https://sandbox-xyz.run.app"`` or ``"ws://localhost:8080"``.
         token: Optional bearer token for authentication.
-        connect_timeout: Seconds to wait for the WebSocket handshake.
+        connect_timeout: Seconds to wait for the WebSocket handshake. Defaults to
+            ``10`` — fail a stalled connect fast and retry rather than blocking.
+            Raise it for platforms with slow cold starts.
+        start_attempts: How many times to attempt the initial connect (+ tools
+            upload) before giving up. ``1`` disables retry.
+        start_retry_delay_seconds / start_retry_jitter_seconds: Linear backoff
+            between connect attempts — ``delay * attempt + uniform(0, jitter)``.
     """
 
     url: str
     token: str | None = None
-    connect_timeout: float = 30.0
+    connect_timeout: float = 10.0
+    start_attempts: int = 3
+    start_retry_delay_seconds: float = 1.0
+    start_retry_jitter_seconds: float = 0.25
     max_message_size: int = 256 * 1024 * 1024
     max_upload_tools_bytes: int = 100 * 1024 * 1024
     max_upload_workspace_bytes: int = 100 * 1024 * 1024
@@ -52,6 +81,20 @@ class RemoteBackend:
         tools_files: Mapping[str, str],
         workdir_path: str,
         timeout_seconds: int | None,
+    ) -> SandboxSession:
+        attempts = max(1, self.start_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._connect(tools_files=tools_files, workdir_path=workdir_path)
+            except Exception as exc:
+                if attempt >= attempts or not _is_retryable_connect_error(exc):
+                    raise
+                jitter = random.uniform(0.0, self.start_retry_jitter_seconds)
+                await asyncio.sleep(self.start_retry_delay_seconds * attempt + jitter)
+        raise RuntimeError("unreachable remote backend retry state")
+
+    async def _connect(
+        self, *, tools_files: Mapping[str, str], workdir_path: str
     ) -> SandboxSession:
         ws_url = self.url
         if ws_url.startswith("https://"):
@@ -79,14 +122,7 @@ class RemoteBackend:
                     f"tools archive ({len(tools_tar):,} bytes) exceeds "
                     f"max_upload_tools_bytes ({self.max_upload_tools_bytes:,})"
                 )
-            workspace_tar = _create_tar_from_dir(workdir_path)
-            if len(workspace_tar) > self.max_upload_workspace_bytes:
-                raise ValueError(
-                    f"workspace archive ({len(workspace_tar):,} bytes) exceeds "
-                    f"max_upload_workspace_bytes ({self.max_upload_workspace_bytes:,})"
-                )
             await ws.send(tools_tar)
-            await ws.send(workspace_tar)
         except BaseException:
             await ws.close()
             raise
@@ -94,19 +130,45 @@ class RemoteBackend:
         return _RemoteSandboxSession(
             ws=ws,
             workdir_path=workdir_path,
+            max_upload_workspace_bytes=self.max_upload_workspace_bytes,
             max_download_workspace_bytes=self.max_download_workspace_bytes,
         )
 
 
 class _RemoteSandboxSession:
-    def __init__(self, *, ws: Any, workdir_path: str, max_download_workspace_bytes: int) -> None:
+    def __init__(
+        self,
+        *,
+        ws: Any,
+        workdir_path: str,
+        max_upload_workspace_bytes: int,
+        max_download_workspace_bytes: int,
+    ) -> None:
         self._ws = ws
         self._workdir_path = workdir_path
+        self._max_upload_workspace_bytes = max_upload_workspace_bytes
         self._max_download_workspace_bytes = max_download_workspace_bytes
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        # Always send a (possibly empty) workspace tar so the per-block frame
+        # order — binary tar, then RunFrame — stays fixed and the WS never desyncs.
+        workspace_tar = _create_tar_from_paths(self._workdir_path, input_paths)
+        if len(workspace_tar) > self._max_upload_workspace_bytes:
+            raise ValueError(
+                f"workspace archive ({len(workspace_tar):,} bytes) exceeds "
+                f"max_upload_workspace_bytes ({self._max_upload_workspace_bytes:,})"
+            )
+        try:
+            await self._ws.send(workspace_tar)
+        except websockets.ConnectionClosed as exc:
+            raise SandboxConnectionError("sandbox connection closed while staging inputs") from exc
 
     async def send(self, frame: Frame) -> None:
         payload = encode(frame)
-        await self._ws.send(payload.decode("utf-8"))
+        try:
+            await self._ws.send(payload.decode("utf-8"))
+        except websockets.ConnectionClosed as exc:
+            raise SandboxConnectionError("sandbox connection closed while sending frame") from exc
 
     async def frames(self) -> AsyncIterator[Frame]:
         try:
@@ -121,14 +183,20 @@ class _RemoteSandboxSession:
             return
 
     async def wait(self) -> SandboxResult:
-        msg = await self._ws.recv()
+        try:
+            msg = await self._ws.recv()
+        except websockets.ConnectionClosed as exc:
+            raise SandboxConnectionError("sandbox connection closed before OutputFrame") from exc
         if not isinstance(msg, str):
             raise RuntimeError("expected text frame for OutputFrame")
         frame = decode(msg)
         if not isinstance(frame, OutputFrame):
             raise RuntimeError(f"expected OutputFrame, got {type(frame).__name__}")
 
-        tar_data = await self._ws.recv()
+        try:
+            tar_data = await self._ws.recv()
+        except websockets.ConnectionClosed as exc:
+            raise SandboxConnectionError("sandbox connection closed before workspace tar") from exc
         if isinstance(tar_data, (bytes, bytearray)) and tar_data:
             if len(tar_data) > self._max_download_workspace_bytes:
                 raise ValueError(
@@ -144,6 +212,12 @@ class _RemoteSandboxSession:
         )
 
     async def close(self) -> None:
+        # Best-effort graceful shutdown: a ShutdownFrame lets the container exit
+        # cleanly; closing the WS is the backstop if the frame doesn't land.
+        try:
+            await self._ws.send(encode(ShutdownFrame()).decode("utf-8"))
+        except Exception:
+            pass
         try:
             await self._ws.close()
         except Exception:
@@ -161,16 +235,15 @@ def _create_tar_from_mapping(files: Mapping[str, str]) -> bytes:
     return buf.getvalue()
 
 
-def _create_tar_from_dir(path: str) -> bytes:
+def _create_tar_from_paths(root: str, rel_paths: Sequence[str]) -> bytes:
+    """Tar just the named files under ``root`` (this block's staged inputs)."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for root, _dirs, files in os.walk(path, followlinks=False):
-            for fname in files:
-                abs_path = os.path.join(root, fname)
-                if os.path.islink(abs_path) or not os.path.isfile(abs_path):
-                    continue
-                arcname = os.path.relpath(abs_path, path)
-                tf.add(abs_path, arcname=arcname)
+        for rel in rel_paths:
+            abs_path = os.path.join(root, rel)
+            if os.path.islink(abs_path) or not os.path.isfile(abs_path):
+                continue
+            tf.add(abs_path, arcname=rel)
     return buf.getvalue()
 
 

@@ -105,3 +105,46 @@ async def test_docker_round_trip(docker_image: str) -> None:
         ctx, CodeExecutionInput(code=code, execution_id="docker-run-1")
     )
     assert "ECHO: {'echoed': 'hello from container'}" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_docker_two_block_turn_preserves_state(docker_image: str) -> None:
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id="docker-s2",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _fake_ctx(artifact_service, session)  # one invocation_id => one turn
+
+    executor = CodeModeCodeExecutor(
+        tools=[],
+        backend=UnsafeLocalDockerBackend(image=docker_image),
+        max_output_chars=10_000,
+        timeout_seconds=60,
+    )
+
+    # Two blocks of the same turn must run in the same container: the variable
+    # and the /workspace file set in block 1 have to be visible in block 2.
+    await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="turn_value = 99\nopen('turn.txt', 'w').write('kept')\n",
+            execution_id="docker-run-2a",
+        ),
+    )
+    result = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="print('value', turn_value)\nprint('file', open('turn.txt').read())\n",
+            execution_id="docker-run-2b",
+        ),
+    )
+
+    assert "value 99" in result.stdout
+    assert "file kept" in result.stdout
+
+    executor.release_invocation(ctx.invocation_id)

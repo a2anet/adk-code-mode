@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -21,7 +22,9 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.genai import types as genai_types
 
-from adk_code_mode.executor import CodeModeCodeExecutor
+from adk_code_mode.executor import CodeModeCodeExecutor, ProtocolVersionMismatchError
+from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
+from adk_code_mode.runtime.protocol import PROTOCOL_VERSION, DoneFrame, Frame, ReadyFrame
 
 from ._fake_runtime import FakeRuntime
 
@@ -302,6 +305,9 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
         "    mime_type='text/plain',\n"
         ")\n"
     )
+    # Distinct invocation_ids model two separate turns: /workspace resets between
+    # turns, while Artifacts persist across them.
+    ctx.invocation_id = "inv-fresh-1"
     await executor._aexecute(ctx, CodeExecutionInput(code=first, execution_id="run-fresh-1"))
 
     second = (
@@ -310,6 +316,7 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
         "print('workspace_has_temp', os.path.exists('temp.txt'))\n"
         "print('artifact_value', load_artifact(filename='persist.txt')['data'])\n"
     )
+    ctx.invocation_id = "inv-fresh-2"
     result = await executor._aexecute(
         ctx, CodeExecutionInput(code=second, execution_id="run-fresh-2")
     )
@@ -546,3 +553,340 @@ async def test_optional_stub_args_are_omitted_when_unspecified() -> None:
     result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-opt"))
     assert "'has_record_id': False" in result.stdout
     assert result.stderr.strip() == ""
+
+
+# --- Turn-scoped session tests -------------------------------------------------
+
+
+class _CountingBackend:
+    """Wraps ``FakeRuntime`` and counts how many containers it starts."""
+
+    def __init__(self) -> None:
+        self._inner = FakeRuntime()
+        self.starts = 0
+
+    async def start(
+        self, *, tools_files: Mapping[str, str], workdir_path: str, timeout_seconds: int | None
+    ) -> SandboxSession:
+        self.starts += 1
+        return await self._inner.start(
+            tools_files=tools_files, workdir_path=workdir_path, timeout_seconds=timeout_seconds
+        )
+
+
+class _RaisingSession:
+    """A session whose first block drops the connection (drives reconnect)."""
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
+
+    async def send(self, frame: Frame) -> None:
+        raise SandboxConnectionError("simulated mid-turn connection loss")
+
+    async def frames(self) -> AsyncIterator[Frame]:
+        return
+        yield  # pragma: no cover  (makes this an async generator)
+
+    async def wait(self) -> SandboxResult:
+        raise SandboxConnectionError("simulated mid-turn connection loss")
+
+    async def close(self) -> None:
+        return None
+
+
+class _ConnectionLostOnceBackend:
+    """First ``start`` yields a dead session; later starts use a real ``FakeRuntime``."""
+
+    def __init__(self) -> None:
+        self._inner = FakeRuntime()
+        self.starts = 0
+
+    async def start(
+        self, *, tools_files: Mapping[str, str], workdir_path: str, timeout_seconds: int | None
+    ) -> SandboxSession:
+        self.starts += 1
+        if self.starts == 1:
+            return _RaisingSession()
+        return await self._inner.start(
+            tools_files=tools_files, workdir_path=workdir_path, timeout_seconds=timeout_seconds
+        )
+
+
+def _fresh_ctx(session_id: str, invocation_id: str) -> InvocationContext:
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id=session_id,
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_invocation_context(artifact_service, session)
+    ctx.invocation_id = invocation_id
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_variables_persist_across_blocks_within_a_turn() -> None:
+    ctx = _fresh_ctx("s-persist-vars", "inv-persist-vars")
+    executor = CodeModeCodeExecutor(tools=[], backend=_CountingBackend(), max_output_chars=10_000)
+
+    await executor._aexecute(ctx, CodeExecutionInput(code="x = 41\n", execution_id="b1"))
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="print('x+1', x + 1)\n", execution_id="b2")
+    )
+
+    assert "x+1 42" in result.stdout
+    assert result.stderr.strip() == ""
+    # Both blocks reused a single container.
+    assert executor.backend.starts == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_persists_across_blocks_within_a_turn() -> None:
+    ctx = _fresh_ctx("s-persist-ws", "inv-persist-ws")
+    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+
+    await executor._aexecute(
+        ctx,
+        CodeExecutionInput(code="open('carry.txt', 'w').write('kept')\n", execution_id="b1"),
+    )
+    result = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(code="print('carry', open('carry.txt').read())\n", execution_id="b2"),
+    )
+
+    assert "carry kept" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_distinct_invocations_get_distinct_sessions_and_no_state_leak() -> None:
+    backend = _CountingBackend()
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    ctx_a = _fresh_ctx("s-distinct-a", "inv-distinct-a")
+    await executor._aexecute(ctx_a, CodeExecutionInput(code="secret = 7\n", execution_id="a1"))
+
+    ctx_b = _fresh_ctx("s-distinct-b", "inv-distinct-b")
+    result = await executor._aexecute(
+        ctx_b,
+        CodeExecutionInput(code="print('has_secret', 'secret' in dir())\n", execution_id="b1"),
+    )
+
+    assert backend.starts == 2
+    assert "has_secret False" in result.stdout
+    assert len(executor._sessions) == 2
+
+
+@pytest.mark.asyncio
+async def test_release_invocation_closes_the_turn_session() -> None:
+    ctx = _fresh_ctx("s-release", "inv-release")
+    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+
+    await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
+    turn = executor._sessions["inv-release"]
+
+    executor.release_invocation("inv-release")
+    assert "inv-release" not in executor._sessions  # popped synchronously
+
+    for _ in range(50):
+        if turn.session._closed:  # type: ignore[attr-defined]
+            break
+        await asyncio.sleep(0.01)
+    assert turn.session._closed is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_idle_reaper_closes_stale_sessions() -> None:
+    ctx = _fresh_ctx("s-reap", "inv-reap")
+    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+    executor.session_idle_timeout_seconds = 0.01
+
+    await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
+    turn = executor._sessions["inv-reap"]
+    turn.last_used = time.monotonic() - 100.0
+
+    await executor._reap_once()
+
+    assert "inv-reap" not in executor._sessions
+    assert turn.session._closed is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_per_block_output_files_reflect_only_that_blocks_changes() -> None:
+    ctx = _fresh_ctx("s-outputs", "inv-outputs")
+    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+
+    first = await executor._aexecute(
+        ctx, CodeExecutionInput(code="open('a.txt', 'w').write('A')\n", execution_id="b1")
+    )
+    second = await executor._aexecute(
+        ctx, CodeExecutionInput(code="open('b.txt', 'w').write('B')\n", execution_id="b2")
+    )
+
+    assert {f.name for f in first.output_files} == {"a.txt"}
+    # a.txt is unchanged in block 2, so only b.txt is reported.
+    assert {f.name for f in second.output_files} == {"b.txt"}
+
+
+@pytest.mark.asyncio
+async def test_freshly_staged_inputs_are_not_reported_as_outputs() -> None:
+    ctx = _fresh_ctx("s-staged", "inv-staged")
+    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="open('made.txt', 'w').write('new')\n",
+            execution_id="b1",
+            input_files=[File(name="given.txt", content=b"unchanged", mime_type="text/plain")],
+        ),
+    )
+
+    names = {f.name for f in result.output_files}
+    assert "given.txt" not in names
+    assert names == {"made.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_surface_stays_consistent_across_blocks() -> None:
+    ctx = _fresh_ctx("s-surface", "inv-surface")
+    executor = CodeModeCodeExecutor(
+        tools=[_EchoTool()], backend=_CountingBackend(), max_output_chars=10_000
+    )
+
+    call = "from tools import echo\nprint('E', echo(message='hi'))\n"
+    await executor._aexecute(ctx, CodeExecutionInput(code=call, execution_id="b1"))
+    prepared_after_first = executor._sessions["inv-surface"].prepared
+    result = await executor._aexecute(ctx, CodeExecutionInput(code=call, execution_id="b2"))
+
+    assert "E {'echoed': 'hi'}" in result.stdout
+    # The turn reuses one prepared surface (registry + /tools) across blocks.
+    assert executor._sessions["inv-surface"].prepared is prepared_after_first
+    assert executor.backend.starts == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_reconnects_once_after_mid_turn_connection_loss() -> None:
+    ctx = _fresh_ctx("s-reconnect", "inv-reconnect")
+    backend = _ConnectionLostOnceBackend()
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="print('after reconnect')\n", execution_id="b1")
+    )
+
+    assert backend.starts == 2  # dead session dropped, reconnected once
+    assert "after reconnect" in result.stdout
+
+
+class _DropAtWaitSession:
+    """RunFrame is accepted, but the connection drops before the OutputFrame.
+
+    ``done_frames`` controls whether a ``DoneFrame`` arrives first: with one the
+    executor can tell the code ran (``RAN``); with none it cannot (``UNKNOWN``).
+    """
+
+    def __init__(self, *, done: bool) -> None:
+        self._done = done
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
+
+    async def send(self, frame: Frame) -> None:
+        return None  # RunFrame delivered before the drop
+
+    async def frames(self) -> AsyncIterator[Frame]:
+        if self._done:
+            yield DoneFrame(exit_code=0)
+
+    async def wait(self) -> SandboxResult:
+        raise SandboxConnectionError("connection dropped before OutputFrame")
+
+    async def close(self) -> None:
+        return None
+
+
+class _MismatchedReadySession:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
+
+    async def send(self, frame: Frame) -> None:
+        return None
+
+    async def frames(self) -> AsyncIterator[Frame]:
+        yield ReadyFrame(protocol_version=PROTOCOL_VERSION + 1)
+
+    async def wait(self) -> SandboxResult:
+        return SandboxResult(stdout="", stderr="", exit_code=0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _SingleSessionBackend:
+    """Hands out one prebuilt session and counts starts (to prove no reconnect)."""
+
+    def __init__(self, session: SandboxSession) -> None:
+        self._session = session
+        self.starts = 0
+
+    async def start(
+        self, *, tools_files: Mapping[str, str], workdir_path: str, timeout_seconds: int | None
+    ) -> SandboxSession:
+        self.starts += 1
+        return self._session
+
+
+@pytest.mark.asyncio
+async def test_unknown_execution_is_reported_and_not_retried() -> None:
+    ctx = _fresh_ctx("s-unknown", "inv-unknown")
+    backend = _SingleSessionBackend(_DropAtWaitSession(done=False))
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
+    )
+
+    # Code may have run, so we must not re-run it: one start, a message, no output.
+    assert backend.starts == 1
+    assert "unknown whether it executed" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_completed_execution_with_lost_output_is_reported_and_not_retried() -> None:
+    ctx = _fresh_ctx("s-ran", "inv-ran")
+    backend = _SingleSessionBackend(_DropAtWaitSession(done=True))
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
+    )
+
+    # DoneFrame arrived, so we know it ran: one start, a message, no re-run.
+    assert backend.starts == 1
+    assert "already executed" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_protocol_mismatch_discards_and_closes_cached_turn() -> None:
+    ctx = _fresh_ctx("s-protocol", "inv-protocol")
+    session = _MismatchedReadySession()
+    backend = _SingleSessionBackend(session)
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    with pytest.raises(ProtocolVersionMismatchError):
+        await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
+
+    assert "inv-protocol" not in executor._sessions
+    for _ in range(50):
+        if session.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert session.closed is True

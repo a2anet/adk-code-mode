@@ -14,12 +14,24 @@ import os
 import socket
 import sys
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from adk_code_mode.runtime.base import SandboxSession, SandboxResult, SandboxBackend
-from adk_code_mode.runtime.protocol import Frame, ProtocolError, decode, encode
+from adk_code_mode.runtime.base import (
+    SandboxBackend,
+    SandboxConnectionError,
+    SandboxResult,
+    SandboxSession,
+)
+from adk_code_mode.runtime.protocol import (
+    Frame,
+    OutputFrame,
+    ProtocolError,
+    ShutdownFrame,
+    decode,
+    encode,
+)
 
 _SANDBOX_SRC = Path(__file__).resolve().parent.parent / "sandbox-wheel" / "src"
 
@@ -110,41 +122,59 @@ class _FakeSession(SandboxSession):
         self._stdout_task = asyncio.create_task(_drain(proc.stdout, self._stdout_bytes))
         self._stderr_task = asyncio.create_task(_drain(proc.stderr, self._stderr_bytes))
 
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        # No-op: the workspace dir is shared with the subprocess directly.
+        return None
+
     async def send(self, frame: Frame) -> None:
         await asyncio.get_running_loop().sock_sendall(self._sock, encode(frame))
 
-    async def frames(self) -> AsyncIterator[Frame]:
+    async def _next_frame(self) -> Frame | None:
         loop = asyncio.get_running_loop()
         while True:
             while b"\n" not in self._buf:
                 try:
                     chunk = await loop.sock_recv(self._sock, 65536)
                 except (OSError, ConnectionError):
-                    return
+                    return None
                 if not chunk:
-                    return
+                    return None
                 self._buf += chunk
             line, self._buf = self._buf.split(b"\n", 1)
             if not line:
                 continue
             try:
-                yield decode(line)
+                return decode(line)
             except ProtocolError:
                 continue
 
+    async def frames(self) -> AsyncIterator[Frame]:
+        while True:
+            frame = await self._next_frame()
+            if frame is None:
+                return
+            yield frame
+
     async def wait(self) -> SandboxResult:
-        await self._proc.wait()
-        await asyncio.gather(self._stdout_task, self._stderr_task, return_exceptions=True)
+        frame = await self._next_frame()
+        if frame is None:
+            raise SandboxConnectionError("sandbox connection closed before OutputFrame")
+        if not isinstance(frame, OutputFrame):
+            raise RuntimeError(f"expected OutputFrame, got {type(frame).__name__}")
         return SandboxResult(
-            stdout=bytes(self._stdout_bytes).decode("utf-8", errors="replace"),
-            stderr=bytes(self._stderr_bytes).decode("utf-8", errors="replace"),
-            exit_code=self._proc.returncode or 0,
+            stdout=frame.stdout,
+            stderr=frame.stderr,
+            exit_code=frame.exit_code,
         )
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        try:
+            await self.send(ShutdownFrame())
+        except (OSError, ConnectionError):
+            pass
         try:
             self._sock.close()
         except OSError:

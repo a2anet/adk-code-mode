@@ -243,6 +243,54 @@ async def test_remote_variables_and_workspace_persist_across_blocks(
 
 
 @pytest.mark.asyncio
+async def test_remote_workspace_deletions_update_host_snapshot(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    """The downloaded workspace tar is an authoritative snapshot, including deletes."""
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id="remote-delete",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(artifact_service, session)
+
+    executor = CodeModeCodeExecutor(
+        tools=[],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+    )
+
+    await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="open('roundtrip.txt', 'w').write('same')\n",
+            execution_id="remote-delete-1",
+        ),
+    )
+    deleted = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="import os\nos.remove('roundtrip.txt')\nprint(os.path.exists('roundtrip.txt'))\n",
+            execution_id="remote-delete-2",
+        ),
+    )
+    recreated = await executor._aexecute(
+        ctx,
+        CodeExecutionInput(
+            code="open('roundtrip.txt', 'w').write('same')\n",
+            execution_id="remote-delete-3",
+        ),
+    )
+
+    assert "False" in deleted.stdout
+    assert {file.name for file in recreated.output_files} == {"roundtrip.txt"}
+
+
+@pytest.mark.asyncio
 async def test_remote_second_connection_is_rejected(
     http_server: subprocess.Popen[bytes], tmp_path: Path
 ) -> None:

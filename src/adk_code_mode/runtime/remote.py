@@ -21,7 +21,9 @@ import asyncio
 import io
 import os
 import random
+import shutil
 import tarfile
+import tempfile
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -203,7 +205,7 @@ class _RemoteSandboxSession:
                     f"workspace response archive ({len(tar_data):,} bytes) exceeds "
                     f"max_download_workspace_bytes ({self._max_download_workspace_bytes:,})"
                 )
-            _extract_tar(tar_data, self._workdir_path)
+            _replace_dir_contents_from_tar(tar_data, self._workdir_path)
 
         return SandboxResult(
             stdout=frame.stdout,
@@ -268,6 +270,22 @@ def _extract_tar(data: bytes | bytearray, dest: str) -> None:
             member.name = normalized
             members.append(member)
         tf.extractall(dest, members=members)
+
+
+def _replace_dir_contents_from_tar(data: bytes | bytearray, dest: str) -> None:
+    """Replace ``dest`` with the workspace snapshot from ``data``."""
+    dest_real = os.path.realpath(dest)
+    os.makedirs(dest_real, exist_ok=True)
+    parent = os.path.dirname(dest_real)
+    with tempfile.TemporaryDirectory(prefix="adk-code-mode-workspace-", dir=parent) as tmp:
+        _extract_tar(data, tmp)
+        for entry in os.scandir(dest_real):
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+        for name in os.listdir(tmp):
+            shutil.move(os.path.join(tmp, name), os.path.join(dest_real, name))
 
 
 __all__ = ["RemoteBackend"]

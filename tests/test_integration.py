@@ -22,9 +22,9 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.genai import types as genai_types
 
-from adk_code_mode.executor import CodeModeCodeExecutor
+from adk_code_mode.executor import CodeModeCodeExecutor, ProtocolVersionMismatchError
 from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
-from adk_code_mode.runtime.protocol import DoneFrame, Frame
+from adk_code_mode.runtime.protocol import PROTOCOL_VERSION, DoneFrame, Frame, ReadyFrame
 
 from ._fake_runtime import FakeRuntime
 
@@ -808,6 +808,26 @@ class _DropAtWaitSession:
         return None
 
 
+class _MismatchedReadySession:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
+
+    async def send(self, frame: Frame) -> None:
+        return None
+
+    async def frames(self) -> AsyncIterator[Frame]:
+        yield ReadyFrame(protocol_version=PROTOCOL_VERSION + 1)
+
+    async def wait(self) -> SandboxResult:
+        return SandboxResult(stdout="", stderr="", exit_code=0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class _SingleSessionBackend:
     """Hands out one prebuilt session and counts starts (to prove no reconnect)."""
 
@@ -852,3 +872,21 @@ async def test_completed_execution_with_lost_output_is_reported_and_not_retried(
     assert backend.starts == 1
     assert "already executed" in result.stderr
     assert result.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_protocol_mismatch_discards_and_closes_cached_turn() -> None:
+    ctx = _fresh_ctx("s-protocol", "inv-protocol")
+    session = _MismatchedReadySession()
+    backend = _SingleSessionBackend(session)
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    with pytest.raises(ProtocolVersionMismatchError):
+        await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
+
+    assert "inv-protocol" not in executor._sessions
+    for _ in range(50):
+        if session.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert session.closed is True

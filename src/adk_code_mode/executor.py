@@ -388,7 +388,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         for the caller to turn into a user-facing result: ``asyncio.TimeoutError``
         for a timeout, ``_BlockConnectionLost`` for a connection drop (whose
         ``state`` records whether the code ran, so a block that ran — or might
-        have — is never silently re-executed).
+        have — is never silently re-executed), or a protocol/frame ``RuntimeError``.
         """
         for attempt in range(_MAX_BLOCK_ATTEMPTS):
             try:
@@ -411,6 +411,9 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                     logger.debug("failed to reconnect turn session", exc_info=True)
                     raise _BlockConnectionLost(_BlockRunState.NOT_RUN) from reconnect_exc
                 turn.mark_in_use()
+            except RuntimeError:
+                self._discard_turn(invocation_id, turn)
+                raise
         raise _BlockConnectionLost(_BlockRunState.NOT_RUN)  # unreachable: loop returns or raises
 
     def _get_cached_turn(self, invocation_id: str) -> "_TurnSession | None":

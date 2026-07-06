@@ -267,10 +267,15 @@ class _DockerSandboxSession(SandboxSession):
     async def send(self, frame: Frame) -> None:
         payload = encode(frame)
         async with self._lock:
-            await asyncio.get_running_loop().sock_sendall(self._sock, payload)
+            try:
+                await asyncio.get_running_loop().sock_sendall(self._sock, payload)
+            except (OSError, ConnectionError) as exc:
+                raise SandboxConnectionError(
+                    "sandbox connection closed while sending frame"
+                ) from exc
 
     async def _next_frame(self) -> Frame | None:
-        """Read one control frame off the socket, or ``None`` at EOF.
+        """Read one control frame off the socket, or ``None`` at EOF / on a drop.
 
         ``frames()`` and ``wait()`` share ``_recv_buf`` and are only ever driven
         sequentially (drain frames to ``DoneFrame``, then read the ``OutputFrame``),
@@ -279,7 +284,10 @@ class _DockerSandboxSession(SandboxSession):
         loop = asyncio.get_running_loop()
         while True:
             while b"\n" not in self._recv_buf:
-                chunk = await loop.sock_recv(self._sock, 65536)
+                try:
+                    chunk = await loop.sock_recv(self._sock, 65536)
+                except (OSError, ConnectionError):
+                    return None
                 if not chunk:
                     return None
                 self._recv_buf += chunk

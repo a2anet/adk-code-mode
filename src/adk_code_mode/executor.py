@@ -20,6 +20,7 @@ import atexit
 import base64
 import dataclasses
 import datetime as dt
+import enum
 import logging
 import mimetypes
 import os
@@ -27,6 +28,7 @@ import shutil
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from decimal import Decimal
@@ -73,9 +75,33 @@ class ProtocolVersionMismatchError(RuntimeError):
     """Sandbox image's wire protocol does not match the host's."""
 
 
+class _BlockRunState(enum.Enum):
+    """Whether a block's code could have run when the connection dropped mid-block.
+
+    Only ``NOT_RUN`` is safe to re-execute; ``UNKNOWN`` / ``RAN`` are reported back
+    to the model instead so a reconnect can't duplicate the block's side effects.
+    """
+
+    NOT_RUN = "not_run"  # RunFrame never delivered — code definitely did not run
+    UNKNOWN = "unknown"  # RunFrame sent but no DoneFrame — code may have run
+    RAN = "ran"  # DoneFrame received — code ran; only its output was lost
+
+
+class _BlockConnectionLost(Exception):
+    """Raised by ``_run_block`` when the connection drops, carrying ``_BlockRunState``."""
+
+    def __init__(self, state: _BlockRunState) -> None:
+        super().__init__(f"sandbox connection lost (code {state.value})")
+        self.state = state
+
+
 logger = logging.getLogger("adk_code_mode.executor")
 
 _REAPER_MAX_POLL_SECONDS = 30.0
+
+# One block runs at most twice: the original attempt plus a single reconnect, and
+# only when the code never reached the sandbox (``_BlockRunState.NOT_RUN``).
+_MAX_BLOCK_ATTEMPTS = 2
 
 # Every open turn session is registered here (removed on ``aclose``) so ``atexit``
 # and the test harness can release sandbox containers even if an executor is no
@@ -238,8 +264,11 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
                 self._bg_loop.start()
                 CodeModeCodeExecutor._ROOT_LOOP_REGISTRY.append(self._bg_loop)
                 # Idle reaper runs as a task on the loop; the loop's ``stop()``
-                # drain cancels it at shutdown.
-                asyncio.run_coroutine_threadsafe(self._reap_idle_sessions(), self._bg_loop.loop)
+                # drain cancels it at shutdown. It holds only a weakref to the
+                # executor so a dropped executor can still be garbage-collected.
+                asyncio.run_coroutine_threadsafe(
+                    _reap_idle_sessions(weakref.ref(self)), self._bg_loop.loop
+                )
             return self._bg_loop.loop
 
     async def _aexecute(
@@ -268,37 +297,19 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         turn.mark_in_use()
         try:
             try:
-                result, dispatcher = await self._run_attempt(
-                    turn, invocation_context, code, execution_id, code_execution_input.input_files
+                turn, result, dispatcher = await self._run_block_reconnecting(
+                    invocation_id,
+                    turn,
+                    prepared,
+                    invocation_context,
+                    code,
+                    execution_id,
+                    code_execution_input.input_files,
                 )
             except asyncio.TimeoutError:
-                self._discard_turn(invocation_id, turn)
                 return _timeout_result(self.timeout_seconds)
-            except SandboxConnectionError:
-                # Mid-turn connection loss: drop the dead session, reconnect on a
-                # fresh (cold) container and retry the block once. In-turn state
-                # is lost — documented and acceptable.
-                self._discard_turn(invocation_id, turn)
-                turn = await self._create_turn(invocation_id, prepared)
-                turn.mark_in_use()
-                try:
-                    result, dispatcher = await self._run_attempt(
-                        turn,
-                        invocation_context,
-                        code,
-                        execution_id,
-                        code_execution_input.input_files,
-                    )
-                except asyncio.TimeoutError:
-                    self._discard_turn(invocation_id, turn)
-                    return _timeout_result(self.timeout_seconds)
-                except SandboxConnectionError:
-                    self._discard_turn(invocation_id, turn)
-                    return CodeExecutionResult(
-                        stdout="",
-                        stderr="Sandbox connection lost and could not be re-established.",
-                        output_files=[],
-                    )
+            except _BlockConnectionLost as exc:
+                return _connection_lost_result(exc.state)
 
             output_files = turn.workspace.collect_outputs()
             await self._fire_artifacts_saved(invocation_context, dispatcher.artifact_delta)
@@ -340,7 +351,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
 
         Stages this block's inputs into the turn workspace first, then drives the
         per-block contract. Raises ``asyncio.TimeoutError`` on timeout and
-        ``SandboxConnectionError`` if the connection dropped mid-block.
+        ``_BlockConnectionLost`` if the connection dropped mid-block.
         """
         dispatcher = Dispatcher(
             invocation_context=invocation_context,
@@ -359,6 +370,48 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             timeout=self.timeout_seconds if self.timeout_seconds else None,
         )
         return result, dispatcher
+
+    async def _run_block_reconnecting(
+        self,
+        invocation_id: str,
+        turn: "_TurnSession",
+        prepared: "_PreparedToolSurface",
+        invocation_context: InvocationContext,
+        code: str,
+        execution_id: str,
+        input_files: Sequence[File],
+    ) -> tuple["_TurnSession", SandboxResult, Dispatcher]:
+        """Run the block, reconnecting once only if the code never reached the sandbox.
+
+        Returns the (possibly reconnected) turn plus its result. On a terminal
+        failure the offending turn is already discarded and the cause is re-raised
+        for the caller to turn into a user-facing result: ``asyncio.TimeoutError``
+        for a timeout, ``_BlockConnectionLost`` for a connection drop (whose
+        ``state`` records whether the code ran, so a block that ran — or might
+        have — is never silently re-executed).
+        """
+        for attempt in range(_MAX_BLOCK_ATTEMPTS):
+            try:
+                result, dispatcher = await self._run_attempt(
+                    turn, invocation_context, code, execution_id, input_files
+                )
+                return turn, result, dispatcher
+            except asyncio.TimeoutError:
+                self._discard_turn(invocation_id, turn)
+                raise
+            except _BlockConnectionLost as exc:
+                self._discard_turn(invocation_id, turn)
+                if exc.state is not _BlockRunState.NOT_RUN or attempt + 1 >= _MAX_BLOCK_ATTEMPTS:
+                    raise
+                # Code never ran: reconnect on a fresh (cold) container and retry.
+                # A failed reconnect leaves the code un-run, so report it as such.
+                try:
+                    turn = await self._create_turn(invocation_id, prepared)
+                except Exception as reconnect_exc:
+                    logger.debug("failed to reconnect turn session", exc_info=True)
+                    raise _BlockConnectionLost(_BlockRunState.NOT_RUN) from reconnect_exc
+                turn.mark_in_use()
+        raise _BlockConnectionLost(_BlockRunState.NOT_RUN)  # unreachable: loop returns or raises
 
     def _get_cached_turn(self, invocation_id: str) -> "_TurnSession | None":
         with self._sessions_lock:
@@ -403,19 +456,13 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             # Loop not running (e.g. torn down); nothing more we can safely do.
             logger.debug("could not schedule turn session close", exc_info=True)
 
-    async def _reap_idle_sessions(self) -> None:
-        interval = max(0.05, min(self.session_idle_timeout_seconds / 2.0, _REAPER_MAX_POLL_SECONDS))
-        while True:
-            await asyncio.sleep(interval)
-            await self._reap_once()
-
     async def _reap_once(self) -> None:
         """Close and drop sessions idle longer than ``session_idle_timeout_seconds``."""
         now = time.monotonic()
         stale: list[_TurnSession] = []
         with self._sessions_lock:
             for invocation_id, turn in list(self._sessions.items()):
-                if turn.in_use == 0 and (now - turn.last_used) > self.session_idle_timeout_seconds:
+                if not turn.in_use and (now - turn.last_used) > self.session_idle_timeout_seconds:
                     stale.append(turn)
                     del self._sessions[invocation_id]
         for turn in stale:
@@ -563,14 +610,14 @@ class _TurnSession:
     prepared: _PreparedToolSurface
     loop: asyncio.AbstractEventLoop
     last_used: float
-    in_use: int = 0
+    in_use: bool = False
 
     def mark_in_use(self) -> None:
-        self.in_use += 1
+        self.in_use = True
         self.last_used = time.monotonic()
 
     def mark_idle(self) -> None:
-        self.in_use = max(0, self.in_use - 1)
+        self.in_use = False
         self.last_used = time.monotonic()
 
     async def aclose(self) -> None:
@@ -612,6 +659,27 @@ def _timeout_result(timeout_seconds: int | None) -> CodeExecutionResult:
     )
 
 
+def _connection_lost_result(state: _BlockRunState) -> CodeExecutionResult:
+    """Message the model when a connection drop stops us from returning output."""
+    if state is _BlockRunState.RAN:
+        stderr = (
+            "Your code ran, but the sandbox connection dropped before its output could be "
+            "returned, so the output is lost. Do not run it again — it already executed."
+        )
+    elif state is _BlockRunState.UNKNOWN:
+        stderr = (
+            "The sandbox connection dropped while your code was running, so it is unknown "
+            "whether it executed and any output is lost. Do not blindly re-run it — check "
+            "whether its effects took place first."
+        )
+    else:  # NOT_RUN
+        stderr = (
+            "The sandbox connection was lost before your code ran, so it did not execute. "
+            "You can run it again."
+        )
+    return CodeExecutionResult(stdout="", stderr=stderr, output_files=[])
+
+
 def _stderr_with_exit_code(stderr: str, exit_code: int) -> str:
     if exit_code == 0:
         return stderr
@@ -633,18 +701,35 @@ async def _run_block(
     Per-block contract: stage inputs → send ``RunFrame`` → drain frames until
     ``DoneFrame`` → read the block's ``OutputFrame``. ``ShutdownFrame`` is *not*
     sent here — it belongs to ``session.close()`` at turn end.
+
+    A mid-block connection drop is re-raised as ``_BlockConnectionLost`` tagged
+    with whether the code could have run: the ``RunFrame`` never left the host
+    (``NOT_RUN``, safe to retry), a ``DoneFrame`` came back so it did run
+    (``RAN``), or the ``RunFrame`` was sent but no ``DoneFrame`` arrived
+    (``UNKNOWN``).
     """
-    await session.begin_block(input_paths)
-    host_loop = asyncio.create_task(_host_loop(session=session, dispatcher=dispatcher))
+    code_sent = False
     done_exit_code: int | None = None
     try:
-        await session.send(RunFrame(code=code))
-        done_exit_code = await host_loop
-    finally:
-        if not host_loop.done():
-            host_loop.cancel()
-            await asyncio.gather(host_loop, return_exceptions=True)
-    result = await session.wait()
+        await session.begin_block(input_paths)
+        host_loop = asyncio.create_task(_host_loop(session=session, dispatcher=dispatcher))
+        try:
+            await session.send(RunFrame(code=code))
+            code_sent = True
+            done_exit_code = await host_loop
+        finally:
+            if not host_loop.done():
+                host_loop.cancel()
+                await asyncio.gather(host_loop, return_exceptions=True)
+        result = await session.wait()
+    except SandboxConnectionError as exc:
+        if done_exit_code is not None:
+            state = _BlockRunState.RAN
+        elif code_sent:
+            state = _BlockRunState.UNKNOWN
+        else:
+            state = _BlockRunState.NOT_RUN
+        raise _BlockConnectionLost(state) from exc
     if done_exit_code is None:
         return result
     return SandboxResult(
@@ -825,6 +910,28 @@ class _BackgroundLoop:
             self.loop.close()
         except Exception:
             pass
+
+
+async def _reap_idle_sessions(executor_ref: "weakref.ref[CodeModeCodeExecutor]") -> None:
+    """Poll the executor's sessions and close idle ones.
+
+    Holds only a weak reference so a dropped executor can be garbage-collected;
+    the task then exits on its next tick instead of pinning the executor for the
+    life of the background loop.
+    """
+    while True:
+        executor = executor_ref()
+        if executor is None:
+            return
+        interval = max(
+            0.05, min(executor.session_idle_timeout_seconds / 2.0, _REAPER_MAX_POLL_SECONDS)
+        )
+        del executor  # don't keep the executor alive across the sleep
+        await asyncio.sleep(interval)
+        executor = executor_ref()
+        if executor is None:
+            return
+        await executor._reap_once()
 
 
 def _close_live_sessions_blocking() -> None:

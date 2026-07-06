@@ -24,7 +24,7 @@ from google.genai import types as genai_types
 
 from adk_code_mode.executor import CodeModeCodeExecutor
 from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
-from adk_code_mode.runtime.protocol import Frame
+from adk_code_mode.runtime.protocol import DoneFrame, Frame
 
 from ._fake_runtime import FakeRuntime
 
@@ -779,3 +779,76 @@ async def test_reconnects_once_after_mid_turn_connection_loss() -> None:
 
     assert backend.starts == 2  # dead session dropped, reconnected once
     assert "after reconnect" in result.stdout
+
+
+class _DropAtWaitSession:
+    """RunFrame is accepted, but the connection drops before the OutputFrame.
+
+    ``done_frames`` controls whether a ``DoneFrame`` arrives first: with one the
+    executor can tell the code ran (``RAN``); with none it cannot (``UNKNOWN``).
+    """
+
+    def __init__(self, *, done: bool) -> None:
+        self._done = done
+
+    async def begin_block(self, input_paths: Sequence[str]) -> None:
+        return None
+
+    async def send(self, frame: Frame) -> None:
+        return None  # RunFrame delivered before the drop
+
+    async def frames(self) -> AsyncIterator[Frame]:
+        if self._done:
+            yield DoneFrame(exit_code=0)
+
+    async def wait(self) -> SandboxResult:
+        raise SandboxConnectionError("connection dropped before OutputFrame")
+
+    async def close(self) -> None:
+        return None
+
+
+class _SingleSessionBackend:
+    """Hands out one prebuilt session and counts starts (to prove no reconnect)."""
+
+    def __init__(self, session: SandboxSession) -> None:
+        self._session = session
+        self.starts = 0
+
+    async def start(
+        self, *, tools_files: Mapping[str, str], workdir_path: str, timeout_seconds: int | None
+    ) -> SandboxSession:
+        self.starts += 1
+        return self._session
+
+
+@pytest.mark.asyncio
+async def test_unknown_execution_is_reported_and_not_retried() -> None:
+    ctx = _fresh_ctx("s-unknown", "inv-unknown")
+    backend = _SingleSessionBackend(_DropAtWaitSession(done=False))
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
+    )
+
+    # Code may have run, so we must not re-run it: one start, a message, no output.
+    assert backend.starts == 1
+    assert "unknown whether it executed" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.asyncio
+async def test_completed_execution_with_lost_output_is_reported_and_not_retried() -> None:
+    ctx = _fresh_ctx("s-ran", "inv-ran")
+    backend = _SingleSessionBackend(_DropAtWaitSession(done=True))
+    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+
+    result = await executor._aexecute(
+        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
+    )
+
+    # DoneFrame arrived, so we know it ran: one start, a message, no re-run.
+    assert backend.starts == 1
+    assert "already executed" in result.stderr
+    assert result.stdout == ""

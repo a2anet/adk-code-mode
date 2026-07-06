@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.2...adk-code-mode-v0.3.0) (2026-07-06)
+
+
+### Features
+
+* hold one sandbox container open per turn (protocol v2) ([#6](https://github.com/a2anet/adk-code-mode/issues/6)) ([aebe17d](https://github.com/a2anet/adk-code-mode/commit/aebe17d2bbbf21cc0f05852efaf910ff6adc3154))
+
+
+### Documentation
+
+* lower startup probe period in `README.md` for faster cold starts ([e251af2](https://github.com/a2anet/adk-code-mode/commit/e251af2cf7307c9944361e1a0e37c7191822a9e1))
+* note HTTP `/health` startup probe in `README.md` Cloud Run section ([d58fb10](https://github.com/a2anet/adk-code-mode/commit/d58fb10f7aeda95e5c8cf29263a13e1333f661dd))
+
 ## [0.2.2](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.1...adk-code-mode-v0.2.2) (2026-05-08)
 
 

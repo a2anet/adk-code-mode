@@ -323,7 +323,15 @@ def _release(callback_context):
 agent = LlmAgent(..., after_agent_callback=[_release])
 ```
 
-Two safety nets cover turns that never signal a clean end: an idle reaper closes sessions idle longer than `session_idle_timeout_seconds` (default `600`), and a mid-turn connection loss (or a `timeout_seconds` firing) drops the session so the next block reconnects on a fresh container — in-turn state is lost, which is acceptable and rare.
+Two safety nets cover turns that never signal a clean end: an idle reaper closes sessions idle longer than `session_idle_timeout_seconds` (default `600`), and a mid-turn connection loss (or a `timeout_seconds` firing) drops the session — in-turn state (globals + `/workspace`) is lost and the next block reconnects on a fresh container.
+
+If the connection drops **while a block is running**, the executor re-runs the block only when the code provably never reached the sandbox, so a reconnect can't duplicate a tool call's side effects. What happens depends on how far the block got before the drop:
+
+- **Not run** — the `RunFrame` never left the host, so the code did not execute; the executor reconnects on a fresh container and retries the block once automatically.
+- **Ran (output lost)** — a `DoneFrame` came back before the drop, so the code executed but its stdout/stderr and output files couldn't be returned; the block is **not** re-run.
+- **Unknown** — the `RunFrame` was sent but no `DoneFrame` arrived, so whether the code executed is unknowable; the block is **not** re-run.
+
+For the `Ran` and `Unknown` cases the block returns a short message in its `stderr` telling the model what happened, so it can decide whether to re-run the code or check for its effects rather than the executor silently repeating it.
 
 ```python
 CodeModeCodeExecutor(tools=..., backend=..., session_idle_timeout_seconds=600)

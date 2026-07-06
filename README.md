@@ -51,11 +51,12 @@ Requires Python 3.10+. Local development requires [Docker](https://docs.docker.c
 
 ## 🚀 Usage
 
-Build a `CodeModeCodeExecutor`, then wire three things into the agent:
+Build a `CodeModeCodeExecutor`, then wire four things into the agent:
 
 - **`CODE_MODE_SYSTEM_INSTRUCTION`** — append to the agent's `instruction`. Teaches the model how to write code blocks and use artifacts.
 - **`code_mode_before_model_callback`** — set as `before_model_callback`. Injects the tool catalog (`<code-mode>` block) into the system prompt on every model turn.
 - **`generate_content_config`** with `function_calling_config.mode="NONE"` — disables native function calling so the model writes Python instead of attempting tool calls that fail with `MALFORMED_FUNCTION_CALL` (since `tools=[]`).
+- **`release_invocation`** — call it from the agent's `after_agent_callback` to release the turn's sandbox container as soon as the turn ends. An idle reaper (`session_idle_timeout_seconds`, default `600`) is a backstop, so containers are still reclaimed without it — just later.
 
 ### Production (remote sandbox)
 
@@ -77,6 +78,9 @@ executor = CodeModeCodeExecutor(
     ),
 )
 
+def _release_sandbox(callback_context):
+    executor.release_invocation(callback_context.invocation_id)
+
 root_agent = LlmAgent(
     name="assistant",
     model="gemini-2.5-pro",
@@ -89,6 +93,7 @@ root_agent = LlmAgent(
         ),
     ),
     before_model_callback=code_mode_before_model_callback(executor),
+    after_agent_callback=[_release_sandbox],
 )
 ```
 
@@ -119,16 +124,7 @@ print(send_message(channel="C123", text="hi"))
 
 ## 🌐 Remote Deployment
 
-**Every turn runs in its own container.** The container accepts exactly one WebSocket connection and holds it open for the whole turn, executing **one or more** code blocks with persistent globals + `/workspace`, then exits when the turn ends (`ShutdownFrame` or disconnect). The hosting platform destroys the container after each turn — no cross-turn or cross-tenant data leakage, no residual state. You **must** configure your platform for one container per turn (`--concurrency 1` on Cloud Run, or equivalent).
-
-Setting `ADK_CODE_MODE_CONTROL_HTTP=1` activates HTTP mode. The container:
-
-1. Starts a WebSocket server on port 8080 (configurable via `PORT`)
-2. Accepts exactly one connection (rejects further connections with 503)
-3. Receives the tools tar **once**, then announces readiness
-4. Sanitizes the environment (strips all env vars except a safe allowlist)
-5. For each code block: receives that block's workspace tar, executes user code (tools proxied back to the host over the same WebSocket; globals + `/workspace` persist across blocks), then returns stdout/stderr and the updated workspace
-6. Exits when the turn ends (`ShutdownFrame` or disconnect)
+**Every turn runs in its own container**, which the platform destroys when the turn ends — no cross-turn or cross-tenant state. The sandbox runs as a WebSocket server (set `ADK_CODE_MODE_CONTROL_HTTP=1`) and accepts exactly one connection, so you **must** configure your platform for one container per turn (`--concurrency 1` on Cloud Run, or equivalent).
 
 ### Deploy to Cloud Run
 
@@ -156,7 +152,7 @@ gcloud compute networks vpc-access connectors create adk-sandbox-connector \
     --region=<region> \
     --subnet=adk-sandbox-subnet
 
-# Deploy — note --concurrency 1 and --vpc-egress=all-traffic
+# Deploy — note --concurrency 1, --vpc-egress=all-traffic, and the /health startup probe
 gcloud run deploy adk-code-mode-sandbox \
     --image <region>-docker.pkg.dev/<project>/<repository>/adk-code-mode-sandbox:latest \
     --region <region> \
@@ -170,10 +166,11 @@ gcloud run deploy adk-code-mode-sandbox \
     --vpc-connector=adk-sandbox-connector \
     --vpc-egress=all-traffic \
     --set-env-vars "ADK_CODE_MODE_CONTROL_HTTP=1" \
-    --set-secrets "ADK_CODE_MODE_AUTH_TOKEN=<your-secret-name>:latest"
+    --set-secrets "ADK_CODE_MODE_AUTH_TOKEN=<your-secret-name>:latest" \
+    --startup-probe "httpGet.path=/health,httpGet.port=8080,timeoutSeconds=3,periodSeconds=3,failureThreshold=80"
 ```
 
-> These flags are **recommendations to tune per deployment**, not hard requirements. `--timeout 3600` (Cloud Run's max) is the per-turn ceiling since the container holds the WebSocket for the whole turn; `--max-instances` should cover your peak concurrent *turns* (`120` covers a 10–100 target — verify your region's Cloud Run vCPU quota). Also add the `/health` startup probe below.
+> These flags are **recommendations to tune per deployment**, not hard requirements. `--timeout 3600` (Cloud Run's max) is the per-turn ceiling since the container holds the WebSocket for the whole turn; `--max-instances` should cover your peak concurrent *turns* (`120` covers a 10–100 target — verify your region's Cloud Run vCPU quota). The `/health` startup probe avoids cold-start `HTTP 503`s — Cloud Run's default TCP probe opens a raw socket the WebSocket server rejects.
 
 Then in your agent:
 
@@ -188,8 +185,6 @@ RemoteBackend(
 
 > **`--vpc-egress=all-traffic` with a deny-all VPC is critical for security.** Without it, user code can make arbitrary outbound requests — including hitting the GCP metadata endpoint (`169.254.169.254`) to steal the service account token, exfiltrating data, or scanning your VPC. The sandbox only needs to _accept_ inbound connections; it never needs outbound access.
 
-> **Configure an HTTP startup probe against `/health`.** Cloud Run's default TCP probe opens a raw socket that the `websockets` server rejects as a malformed HTTP request, which can race with real traffic during cold starts and surface to clients as `HTTP 503` on the WebSocket handshake. Add `--startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=3,periodSeconds=3,failureThreshold=80"` (or equivalent) so probes hit the `/health` endpoint the sandbox handles natively. Keep `periodSeconds` small (e.g. `3`): it sets how long Cloud Run waits before re-probing, so a short period lets a ready container start serving in ~3s instead of ~10s — raise `failureThreshold` to keep the same overall startup budget (`periodSeconds × failureThreshold`). Turn-scoping already gives demand-driven warmth (a container stays up for the whole turn), so `--min-instances=0` is fine; only set `--min-instances` if you want to eliminate cold starts at the cost of a paid warm pool.
-
 ### Deploy on other platforms
 
 The same pattern works on any platform that runs Docker containers as HTTP services (AWS Fargate/ECS, Azure Container Instances, Kubernetes, Fly.io, etc.):
@@ -203,7 +198,7 @@ Required env vars:
 
 | Env var                              | Required | Default | Purpose                          |
 | ------------------------------------ | -------- | ------- | -------------------------------- |
-| `ADK_CODE_MODE_CONTROL_HTTP`         | yes      | —       | Set to `1` to activate HTTP mode |
+| `ADK_CODE_MODE_CONTROL_HTTP`         | yes      | —       | Set to `1` to run the sandbox as a WebSocket server (required for remote) |
 | `ADK_CODE_MODE_AUTH_TOKEN`           | yes      | —       | Bearer token for WebSocket auth  |
 | `PORT`                               | no       | `8080`  | Listen port                      |
 | `ADK_CODE_MODE_MAX_UPLOAD_TOOLS`     | no       | 100 MiB | Max tools tar archive size       |
@@ -224,8 +219,6 @@ RemoteBackend(
     max_download_workspace_bytes=100 * 1024 * 1024,  # 100 MiB (default)
 )
 ```
-
-`connect_timeout` defaults to `10s` — fail a stalled connect fast and retry rather than block. `RemoteBackend` retries transient connect failures up to `start_attempts` times with linear backoff + jitter; raise `connect_timeout` (and/or `start_attempts`) for platforms with slow cold starts.
 
 ## 🗂️ Storage
 
@@ -273,17 +266,18 @@ The same image works for both `RemoteBackend` and `UnsafeLocalDockerBackend`. To
 
 ## ⚙️ Configuration
 
-### Catalog overflow
+All settings are `CodeModeCodeExecutor` constructor arguments:
 
-`max_catalog_chars` (default `50_000`) is a soft cap on the rendered tool catalog in the system prompt. When exceeded, the per-tool sections are replaced with a short note telling the model how to navigate `/tools/` from Python.
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `max_catalog_chars` | `50_000` | Soft cap on the rendered tool catalog in the system prompt. When exceeded, the per-tool sections are replaced with a short note telling the model how to navigate `/tools/` from Python. |
+| `max_output_chars` | `50_000` | Caps stdout/stderr handed back to the model. Overflow is saved as a session artifact at `code_mode/stdout/<execution-id>.txt` and the model sees a head-and-tail view pointing to it. |
+| `max_code_chars` | `1_000_000` | Rejects oversized code payloads before starting a container. |
+| `timeout_seconds` | `None` | Caps overall execution time. Defaults to the platform request timeout (e.g. Cloud Run `--timeout`); set explicitly for defense in depth. |
+| `per_tool_timeout_seconds` | `None` | Caps each individual tool call. |
+| `session_idle_timeout_seconds` | `600` | Idle reaper: closes a turn's container once it goes untouched this long. Backstop for turns that never call `release_invocation`. |
 
-```python
-CodeModeCodeExecutor(tools=..., backend=..., max_catalog_chars=20_000)
-```
-
-### Output truncation
-
-`max_output_chars` (default `50_000`) caps stdout and stderr handed back to the model. Overflow is saved as a session artifact at `code_mode/stdout/<execution-id>.txt`, and the model sees a head-and-tail view with a marker pointing to it.
+The model can read spilled stdout back from the overflow artifact:
 
 ```python
 from tools import load_artifact
@@ -291,53 +285,9 @@ spilled = load_artifact(filename="code_mode/stdout/<execution-id>.txt")
 print(spilled["data"][-2000:])
 ```
 
-### Code size limit
-
-`max_code_chars` (default `1_000_000`) rejects oversized code payloads before starting a container.
-
-### Timeouts
-
-`timeout_seconds` caps overall execution time; `per_tool_timeout_seconds` caps each individual tool call. Both default to `None` (relying on platform timeouts). Set them explicitly for defense in depth:
-
-```python
-CodeModeCodeExecutor(
-    tools=...,
-    backend=...,
-    timeout_seconds=30,
-    per_tool_timeout_seconds=10,
-)
-```
-
-`timeout_seconds` / `per_tool_timeout_seconds` stay `None` by default; with turn-scoping the effective per-turn wall-clock ceiling is the platform request timeout (e.g. Cloud Run `--timeout`).
-
 ### Turn-scoped sessions
 
-A sandbox container is held open for the duration of a **turn** (one ADK invocation) and reused across that turn's code blocks, so cold start is paid at most once per turn instead of once per block. State — Python globals **and** `/workspace` — persists across a turn's blocks and resets between turns (use ADK Artifacts for cross-turn persistence).
-
-The container is released when the turn ends. Wire `code_executor.release_invocation(callback_context.invocation_id)` into your agent's `after_agent_callback` to free it the moment the turn finishes:
-
-```python
-def _release(callback_context):
-    code_executor.release_invocation(callback_context.invocation_id)
-
-agent = LlmAgent(..., after_agent_callback=[_release])
-```
-
-Two safety nets cover turns that never signal a clean end: an idle reaper closes sessions idle longer than `session_idle_timeout_seconds` (default `600`), and a mid-turn connection loss (or a `timeout_seconds` firing) drops the session — in-turn state (globals + `/workspace`) is lost and the next block reconnects on a fresh container.
-
-If the connection drops **while a block is running**, the executor re-runs the block only when the code provably never reached the sandbox, so a reconnect can't duplicate a tool call's side effects. What happens depends on how far the block got before the drop:
-
-- **Not run** — the `RunFrame` never left the host, so the code did not execute; the executor reconnects on a fresh container and retries the block once automatically.
-- **Ran (output lost)** — a `DoneFrame` came back before the drop, so the code executed but its stdout/stderr and output files couldn't be returned; the block is **not** re-run.
-- **Unknown** — the `RunFrame` was sent but no `DoneFrame` arrived, so whether the code executed is unknowable; the block is **not** re-run.
-
-For the `Ran` and `Unknown` cases the block returns a short message in its `stderr` telling the model what happened, so it can decide whether to re-run the code or check for its effects rather than the executor silently repeating it.
-
-```python
-CodeModeCodeExecutor(tools=..., backend=..., session_idle_timeout_seconds=600)
-```
-
-> Turn-scoping is wire-protocol **v2**. The host wheel and the sandbox image must be upgraded together — a version mismatch fails fast with `ProtocolVersionMismatchError` — so rebuild and push the sandbox image when you upgrade.
+A sandbox container is held open for one **turn** (one ADK invocation) and reused across that turn's code blocks, so cold start is paid at most once per turn. Python globals **and** `/workspace` persist across a turn's blocks and reset between turns — use ADK Artifacts for cross-turn persistence. The container is released when the turn ends (via `release_invocation`, wired in [Usage](#-usage)) and destroyed by the platform, so no state survives into another turn or tenant.
 
 ## 🏗️ Architecture
 
@@ -356,7 +306,7 @@ The only things crossing the boundary are: code, tool call arguments, tool retur
 
 Your `instruction` (containing `CODE_MODE_SYSTEM_INSTRUCTION`) followed by a `<code-mode>` block appended by the callback:
 
-```
+~~~
 …your instruction…
 
 # How to execute code and use tools
@@ -408,7 +358,7 @@ from tools import save_artifact, load_artifact, list_artifacts
 …
 
 </code-mode>
-```
+~~~
 
 When the rendered catalog exceeds `max_catalog_chars`, the per-tool sections are replaced with:
 

@@ -112,7 +112,7 @@ _LIVE_TURN_SESSIONS_LOCK = threading.Lock()
 CODE_MODE_SYSTEM_INSTRUCTION = """\
 # How to execute code and use tools
 Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
-The Python Standard Library and a custom set of tools are available to you.
+You have no callable function tools. The Python Standard Library and a set of custom tools are available to you as an importable library, listed in the <code-mode> section below. To use a tool you must write a fenced Python block that imports and calls it — never respond with a function or tool call.
 To see the result of your code, you need to print it.
 
 For example, if you had the following tool:

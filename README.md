@@ -311,28 +311,30 @@ Your `instruction` (containing `CODE_MODE_SYSTEM_INSTRUCTION`) followed by a `<c
 
 # How to execute code and use tools
 Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
-The Python Standard Library and a custom set of tools are available to you.
+You have no callable function tools. The Python Standard Library and a set of custom tools are available to you as an importable library, listed in the `<code-mode>` section below. To use a tool you must write a fenced Python block that imports and calls it — never respond with a function or tool call.
 To see the result of your code, you need to print it.
 
 For example, if you had the following tool:
 
 ```
+<code-mode>
 from tools.slack import send_message
 
 def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any:
     """Send a message to a Slack channel."""
     ...
+</code-mode>
 ```
 
 To call the tool, you should write:
 
-"""
+````
 ```python
 from tools.slack import send_message
 
 print(send_message(channel="C123", text="hi"))
 ```
-"""
+````
 
 # How to use files and variables in between executions
 Within a turn the sandbox is stateful: variables you define and files you write under `/workspace` (the working directory) persist across the successive code blocks you run before replying to the user. They reset at the start of your next turn.

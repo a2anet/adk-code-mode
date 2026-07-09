@@ -339,6 +339,7 @@ Within a turn the sandbox is stateful: variables you define and files you write 
 To carry data across turns, use Artifacts: list them with the `list_artifacts` tool, save with `save_artifact`, and load with `load_artifact`.
 
 <code-mode>
+To call tools you must write Python code in a fenced Python block (i.e. ```python\n...\n```) that imports and runs them. The entries below are a Python library available in the sandbox, not callable functions — do not emit a function or tool call.
 
 # tools.slack
 
@@ -364,6 +365,8 @@ When the rendered catalog exceeds `max_catalog_chars`, the per-tool sections are
 
 ```
 <code-mode>
+To call tools you must write Python code in a fenced Python block (i.e. ```python\n...\n```) that imports and runs them. The entries below are a Python library available in the sandbox, not callable functions — do not emit a function or tool call.
+
 A `tools` package is available in the sandbox. List `/tools/` with
 `pathlib.Path('/tools').iterdir()`. Each entry is either a `.py` file
 (a top-level tool, importable as `from tools import <name>`) or a

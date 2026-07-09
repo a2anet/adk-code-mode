@@ -33,6 +33,15 @@ logger = logging.getLogger("adk_code_mode.callback")
 
 _TOOLS_OPEN = "<code-mode>"
 _TOOLS_CLOSE = "</code-mode>"
+# Gemini (especially on Vertex) otherwise tries to invoke these catalog entries
+# as native function calls, which fail with MALFORMED_FUNCTION_CALL because no
+# function tools are declared. The nudge steers it to write Python instead.
+_TOOLS_NUDGE = (
+    "To call tools you must write Python code in a fenced Python block "
+    "(i.e. ```python\\n...\\n```) that imports and runs them. The entries below "
+    "are a Python library available in the sandbox, not callable functions — "
+    "do not emit a function or tool call."
+)
 
 
 def code_mode_before_model_callback(
@@ -53,7 +62,7 @@ def code_mode_before_model_callback(
         catalog = render_catalog(ns_tools)
         if len(catalog) > executor.max_catalog_chars:
             catalog = render_overflow_catalog()
-        block = f"{_TOOLS_OPEN}\n{catalog}\n{_TOOLS_CLOSE}"
+        block = f"{_TOOLS_OPEN}\n{_TOOLS_NUDGE}\n\n{catalog}\n{_TOOLS_CLOSE}"
 
         _append_system_instruction(llm_request.config, block)
 

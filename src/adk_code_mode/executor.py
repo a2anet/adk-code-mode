@@ -116,19 +116,19 @@ _LIVE_TURN_SESSIONS_LOCK = threading.Lock()
 
 CODE_MODE_SYSTEM_INSTRUCTION = """\
 # How to execute code and use tools
-Code you write in a fenced Python block (i.e. ```python) will be executed in a sandbox.
-You have no callable function tools. The Python Standard Library and a set of custom tools are available to you as an importable library, listed in the `<code-mode>` section below. To use a tool you must write a fenced Python block that imports and calls it — never respond with a function or tool call.
-To see the result of your code, you need to print it.
-
-For example, if you had the following tool:
+You have no callable function tools. To use a tool you must write Python code in a fenced Python block (i.e. ```python\\n...\\n```). Do not emit a function or tool call.
+The Python Standard Library and a set of custom tools are available to you as an importable library, listed in the `<code-mode>` section below.
+To see the result of your code, you need to print it. For example, if you had the following tool:
 
 ```
 <code-mode>
+
 from tools.slack import send_message
 
 def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any:
     \"\"\"Send a message to a Slack channel.\"\"\"
     ...
+
 </code-mode>
 ```
 
@@ -143,8 +143,9 @@ print(send_message(channel="C123", text="hi"))
 ````
 
 # How to use files and variables in between executions
-Within a turn the sandbox is stateful: variables you define and files you write under `/workspace` (the working directory) persist across the successive code blocks you run before replying to the user. They reset at the start of your next turn.
-To carry data across turns, use Artifacts: list them with the `list_artifacts` tool, save with `save_artifact`, and load with `load_artifact`.
+You can reuse variables and files within a turn. Between turns, to reuse variables and files you must save and load Artifacts.
+To list available Artifacts, use the `list_artifacts` tool, to save an Artifact, use the `save_artifact` tool, and to load an Artifact, use the `load_artifact` tool.
+Tool results are automatically saved as Artifacts.
 """
 
 

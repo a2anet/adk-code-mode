@@ -44,6 +44,7 @@ import websockets
 import websockets.asyncio.server
 
 from adk_code_mode_sandbox._entry import (
+    TOOLS_DIR,
     _make_globals,
     _prepare_sys_path,
     _prepare_workdir,
@@ -159,9 +160,11 @@ async def _handle_connection(ws: Any) -> None:
     max_tools = int(os.environ.get(MAX_UPLOAD_TOOLS_ENV, _DEFAULT_MAX_TOOLS_BYTES))
     max_workspace = int(os.environ.get(MAX_UPLOAD_WORKSPACE_ENV, _DEFAULT_MAX_WORKSPACE_BYTES))
 
-    tools_base = tempfile.mkdtemp(prefix="adk-cm-tools-")
-    tools_dir = os.path.join(tools_base, "tools")
-    os.makedirs(tools_dir)
+    # Extract into the documented /tools path (pre-created and owned by the
+    # sandbox user in the image) rather than a temp dir, so the overflow
+    # catalog's hard-coded /tools navigation resolves here exactly as it does
+    # under the Docker backend. The container is single-use, so no cleanup.
+    os.makedirs(TOOLS_DIR, exist_ok=True)
     workspace_dir = tempfile.mkdtemp(prefix="adk-cm-ws-")
 
     try:
@@ -173,11 +176,11 @@ async def _handle_connection(ws: Any) -> None:
             raise ValueError(
                 f"tools archive ({len(tools_data):,} bytes) exceeds limit ({max_tools:,} bytes)"
             )
-        _extract_tar(tools_data, tools_dir)
+        _extract_tar(tools_data, TOOLS_DIR)
 
         # 2. Sanitize environment, then prepare sys.path + a persistent /workspace.
         _sanitize_environ()
-        _prepare_sys_path(tools_dir)
+        _prepare_sys_path(TOOLS_DIR)
         _prepare_workdir(workspace_dir)
 
         # 3. One persistent globals dict for the connection, so variables set in
@@ -192,7 +195,6 @@ async def _handle_connection(ws: Any) -> None:
         while await _run_one_block(ws, loop, globs, workspace_dir, max_workspace):
             pass
     finally:
-        shutil.rmtree(tools_base, ignore_errors=True)
         shutil.rmtree(workspace_dir, ignore_errors=True)
 
 

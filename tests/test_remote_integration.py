@@ -77,7 +77,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture()
-def http_server():  # type: ignore[no-untyped-def]
+def http_server(tmp_path: Path):  # type: ignore[no-untyped-def]
     """Start a single-use sandbox HTTP server subprocess.
 
     Each test gets its own process because the server exits after handling one
@@ -87,6 +87,10 @@ def http_server():  # type: ignore[no-untyped-def]
     env = os.environ.copy()
     env["ADK_CODE_MODE_CONTROL_HTTP"] = "1"
     env["PORT"] = str(port)
+    # The server extracts tools into TOOLS_DIR (default /tools, created in the
+    # image). Run outside a container as a non-root user, it can't mkdir /tools
+    # at the fs root, so point it at a writable temp dir — same as _fake_runtime.
+    env["ADK_CODE_MODE_TOOLS_DIR"] = str(tmp_path / "tools")
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(_SANDBOX_SRC), env.get("PYTHONPATH", "")])
     )

@@ -9,8 +9,8 @@ RUN pip install --no-cache-dir /tmp/adk_code_mode_sandbox-*.whl \
     && rm /tmp/adk_code_mode_sandbox-*.whl
 
 RUN useradd -m -d /home/sandbox sandbox \
-    && mkdir -p /workspace \
-    && chown sandbox:sandbox /workspace
+    && mkdir -p /workspace /tools \
+    && chown sandbox:sandbox /workspace /tools
 USER sandbox
 
 EXPOSE 8080

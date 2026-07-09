@@ -14,6 +14,7 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 - **Call ADK tools from sandbox code** — imports against the `tools` package proxy back to the host and run through ADK's `before_tool` / `after_tool` / `on_error` callbacks and the plugin manager exactly as direct tool calls would.
 - **Bake any Python package into the image** — extend the published base image with anything the model's code needs to `import`, no runtime `pip install` required.
 - **Cross-turn persistence via ADK Artifacts** — `save_artifact` / `load_artifact` / `list_artifacts` are auto-injected and route through your configured `ArtifactService`.
+- **Tool results saved as artifacts** — on by default; every tool's result is persisted as a `code_mode.tool_result` artifact (with optional model-supplied name/description) so hosts can forward outputs and large results stay out of the prompt. Opt out with `save_tool_results_as_artifacts=False`.
 - **Bounded stdout/stderr** — overflow lands in a session artifact instead of poisoning the prompt.
 - **Production-ready remote sandbox** — `RemoteBackend` connects to an isolated per-turn container over WebSocket, reused across the turn's code blocks. Deploy on any cloud platform (Cloud Run, Fargate, ACI, Kubernetes, Fly.io, etc.).
 - **Local development** — `UnsafeLocalDockerBackend` runs the sandbox against your local Docker daemon for fast iteration. **Not for production** — see [Safety](#-safety).
@@ -253,6 +254,16 @@ async def on_saved(invocation_context, delta):
 CodeModeCodeExecutor(tools=..., backend=..., on_artifacts_saved=on_saved)
 ```
 
+### Tool results as artifacts
+
+By default (`save_tool_results_as_artifacts=True`) every non-artifact tool is wrapped so its return value is saved as a session artifact tagged `code_mode.tool_result = "true"`. This lets a host forward tool outputs to the user (read the marker in `on_artifacts_saved`) and keeps large results out of the model's context — a result whose serialised form exceeds the threshold is replaced in the reply with a short note pointing at the artifact, which the model reloads with `load_artifact`.
+
+Naming is transparent: the filename is derived from the tool name and call id. Each wrapped tool also gains two **optional** parameters — `artifact_name` and `artifact_description` — that the model may pass to name/describe the saved artifact; both land in the artifact's `custom_metadata` (`code_mode.artifact_name` / `code_mode.artifact_description`) alongside the marker. Set `save_tool_results_as_artifacts=False` to return tool results inline without persisting them.
+
+```python
+CodeModeCodeExecutor(tools=..., backend=..., save_tool_results_as_artifacts=True)
+```
+
 ## 🐳 Sandbox Image
 
 The published base image (`ghcr.io/a2anet/adk-code-mode`) works as-is for tools whose execution is fully host-side. To bake in extra Python packages:
@@ -361,6 +372,8 @@ from tools import save_artifact, load_artifact, list_artifacts
 
 </code-mode>
 ~~~
+
+With `save_tool_results_as_artifacts` enabled (the default), each non-artifact tool above — e.g. `list_channels` and `send_message` — also carries two optional `artifact_name: str | None = ...` / `artifact_description: str | None = ...` parameters for naming its saved result.
 
 When the rendered catalog exceeds `max_catalog_chars`, the per-tool sections are replaced with:
 

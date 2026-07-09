@@ -14,6 +14,14 @@ from adk_code_mode.runtime import (
     SandboxSession,
     UnsafeLocalDockerBackend,
 )
+from adk_code_mode.tool_result_artifacts import (
+    TOOL_RESULT_DESCRIPTION_KEY,
+    TOOL_RESULT_FILENAME_KEY,
+    TOOL_RESULT_METADATA_KEY,
+    TOOL_RESULT_NAME_KEY,
+    ToolResultArtifactTool,
+    wrap_tool_result_as_artifact,
+)
 
 __all__ = [
     "ArtifactsSavedCallback",
@@ -22,7 +30,13 @@ __all__ = [
     "RemoteBackend",
     "SandboxBackend",
     "SandboxSession",
+    "TOOL_RESULT_DESCRIPTION_KEY",
+    "TOOL_RESULT_FILENAME_KEY",
+    "TOOL_RESULT_METADATA_KEY",
+    "TOOL_RESULT_NAME_KEY",
+    "ToolResultArtifactTool",
     "UnsafeLocalDockerBackend",
     "__version__",
     "code_mode_before_model_callback",
+    "wrap_tool_result_as_artifact",
 ]

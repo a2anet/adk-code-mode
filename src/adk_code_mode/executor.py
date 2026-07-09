@@ -49,6 +49,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from adk_code_mode._artifact_tools import ARTIFACT_TOOLS
 from adk_code_mode.output import truncate
+from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.runtime.base import (
     SandboxBackend,
     SandboxConnectionError,
@@ -102,6 +103,10 @@ _REAPER_MAX_POLL_SECONDS = 30.0
 # One block runs at most twice: the original attempt plus a single reconnect, and
 # only when the code never reached the sandbox (``_BlockRunState.NOT_RUN``).
 _MAX_BLOCK_ATTEMPTS = 2
+
+# Built-in artifact tools are never wrapped for tool-result saving — saving the
+# result of ``save_artifact``/``load_artifact``/``list_artifacts`` is pointless.
+_ARTIFACT_TOOL_NAMES = frozenset(tool.name for tool in ARTIFACT_TOOLS)
 
 # Every open turn session is registered here (removed on ``aclose``) so ``atexit``
 # and the test harness can release sandbox containers even if an executor is no
@@ -168,6 +173,12 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
     """If true (default), ``save_artifact`` / ``load_artifact`` /
     ``list_artifacts`` are injected at the front of ``tools`` as top-level
     tools. Set ``False`` for a strict tool surface."""
+    save_tool_results_as_artifacts: bool = True
+    """If true (default), every non-artifact tool is wrapped so its result is
+    saved as a session artifact tagged ``code_mode.tool_result``. The model may
+    pass optional ``artifact_name`` / ``artifact_description`` to name it; large
+    results are elided from the reply and reloadable via ``load_artifact``. Set
+    ``False`` to return tool results inline without persisting them."""
     on_artifacts_saved: ArtifactsSavedCallback | None = None
     """Optional async callback fired after each ``execute_code`` whose
     sandbox-side ``save_artifact`` calls produced new artifact versions.
@@ -202,6 +213,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
         tools: Sequence[BaseTool | BaseToolset | Callable[..., Any]] = (),
         backend: SandboxBackend,
         include_artifact_tools: bool = True,
+        save_tool_results_as_artifacts: bool = True,
         **kwargs: Any,
     ) -> None:
         adapted: list[BaseTool | BaseToolset] = []
@@ -222,6 +234,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             tools=adapted,
             backend=backend,
             include_artifact_tools=include_artifact_tools,
+            save_tool_results_as_artifacts=save_tool_results_as_artifacts,
             **kwargs,
         )
         # Validate the eagerly-known tool surface (bare BaseTools and FunctionTool-
@@ -493,7 +506,7 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             resolved = await normaliser.resolve(
                 list(self.tools), ReadonlyContext(invocation_context)
             )
-        ns_tools = namespacing.build(resolved)
+        ns_tools = namespacing.build(self.apply_tool_result_wrapping(resolved))
         registry = namespacing.Registry(ns_tools)
 
         tree_files = stubs.render_tree(ns_tools)
@@ -502,6 +515,26 @@ class CodeModeCodeExecutor(BaseCodeExecutor):
             registry=registry,
             tools_map=tools_map,
         )
+
+    def apply_tool_result_wrapping(
+        self, resolved: list[normaliser.ResolvedTool]
+    ) -> list[normaliser.ResolvedTool]:
+        """Wrap each non-artifact tool so its result is saved as an artifact.
+
+        No-op unless ``save_tool_results_as_artifacts`` is set. Applied to the
+        resolved surface right before namespacing so both the catalog (rendered
+        by ``code_mode_before_model_callback``) and the executed stubs expose
+        the same signatures. Safe to call on an already-wrapped list.
+        """
+        if not self.save_tool_results_as_artifacts:
+            return resolved
+        wrapped: list[normaliser.ResolvedTool] = []
+        for rt in resolved:
+            if isinstance(rt.tool, ToolResultArtifactTool) or rt.tool.name in _ARTIFACT_TOOL_NAMES:
+                wrapped.append(rt)
+            else:
+                wrapped.append(dataclasses.replace(rt, tool=ToolResultArtifactTool(rt.tool)))
+        return wrapped
 
     def _record_resolved_tools(
         self, invocation_id: str, resolved: list[normaliser.ResolvedTool]

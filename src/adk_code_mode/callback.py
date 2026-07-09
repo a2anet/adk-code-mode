@@ -49,7 +49,7 @@ def code_mode_before_model_callback(
 
         executor._record_resolved_tools(callback_context.invocation_id, resolved)
 
-        ns_tools = namespacing.build(resolved)
+        ns_tools = namespacing.build(executor.apply_tool_result_wrapping(resolved))
         catalog = render_catalog(ns_tools)
         if len(catalog) > executor.max_catalog_chars:
             catalog = render_overflow_catalog()

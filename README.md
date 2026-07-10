@@ -192,7 +192,7 @@ The same pattern works on any platform that runs Docker containers as HTTP servi
 
 1. **One container per turn.** Each container handles exactly one turn (one or more code blocks) and exits.
 2. **Block all outbound network access.** Without egress restrictions, user code can exfiltrate data, access cloud metadata endpoints, or scan internal networks.
-3. **Set a read-only root filesystem** where the platform supports it (e.g., `readOnlyRootFilesystem: true` in Kubernetes). The sandbox only writes to `/workspace`.
+3. **Keep `/workspace` and `/tools` writable.** The sandbox stages input files into `/workspace` and materialises the `tools` package into `/tools` at connect time. If you set a read-only root filesystem (e.g., `readOnlyRootFilesystem: true` in Kubernetes), mount both as writable volumes (e.g., an `emptyDir`).
 4. **Authenticate connections.** Set `ADK_CODE_MODE_AUTH_TOKEN` and layer platform-level auth (IAM, NetworkPolicy, security groups) on top.
 
 Required env vars:

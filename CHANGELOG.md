@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.3.0...adk-code-mode-v0.4.0) (2026-07-09)
+
+
+### Features
+
+* save tool results as artifacts with optional model-supplied naming ([76a3671](https://github.com/a2anet/adk-code-mode/commit/76a36713b2c52bd5b8dc51d3669226a47e7108e5))
+
+
+### Bug Fixes
+
+* align code-mode example with the `<code-mode>` catalog and fix fences ([4a0cc6d](https://github.com/a2anet/adk-code-mode/commit/4a0cc6d0fc99d5425f6682cc489e76c9ddef7d46))
+* clarify code-mode tools are a Python library, not function tools ([48d1018](https://github.com/a2anet/adk-code-mode/commit/48d1018152a2ed2a8e7361de6ce0f43b31b429ce))
+* nudge the model to call tools via Python in the code-mode block ([141baf3](https://github.com/a2anet/adk-code-mode/commit/141baf3a44976e82cf437b2064666be893d6d409))
+* update `CODE_MODE_SYSTEM_INSTRUCTION` and `README.md` ([933d42c](https://github.com/a2anet/adk-code-mode/commit/933d42cb237b9d6deeb6611511cba28a0d5e9261))
+
+
+### Documentation
+
+* streamline `README.md` and fix broken code fences ([c237514](https://github.com/a2anet/adk-code-mode/commit/c2375149df48e21318967090b6c85d0b1f411ea2))
+
 ## [0.3.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.2.2...adk-code-mode-v0.3.0) (2026-07-06)
 
 

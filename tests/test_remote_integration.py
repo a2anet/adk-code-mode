@@ -23,13 +23,13 @@ import pytest
 import websockets.exceptions
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
-from google.adk.code_executors.code_execution_utils import CodeExecutionInput
 from google.adk.plugins.plugin_manager import PluginManager
 from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
-from adk_code_mode import CodeModeCodeExecutor, RemoteBackend
+from adk_code_mode import ExecuteCodeTool, RemoteBackend
 
 _SANDBOX_SRC = Path(__file__).resolve().parent.parent / "sandbox-wheel" / "src"
 
@@ -68,6 +68,10 @@ def _make_ctx(artifact_service: InMemoryArtifactService, session: Session) -> In
     ctx.credential_service = None
     ctx.invocation_id = "remote-inv-1"
     return ctx
+
+
+def _tool_context(ctx: InvocationContext, *, call_id: str) -> ToolContext:
+    return ToolContext(invocation_context=ctx, function_call_id=call_id)
 
 
 def _free_port() -> int:
@@ -139,16 +143,16 @@ async def test_remote_tool_call(http_server: subprocess.Popen[bytes]) -> None:
     )
     ctx = _make_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[_EchoTool()],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
     )
     code = "from tools import echo\nr = echo(message='hello from remote')\nprint('ECHO:', r)\n"
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code=code, execution_id="remote-run-1")
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-run-1")
     )
-    assert "ECHO: {'echoed': 'hello from remote'}" in result.stdout
+    assert "ECHO: {'echoed': 'hello from remote'}" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -164,15 +168,16 @@ async def test_remote_plain_code(http_server: subprocess.Popen[bytes]) -> None:
     )
     ctx = _make_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
     )
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="print('hello world')", execution_id="remote-run-2")
+    result = await tool.run_async(
+        args={"code": "print('hello world')"},
+        tool_context=_tool_context(ctx, call_id="remote-run-2"),
     )
-    assert "hello world" in result.stdout
+    assert "hello world" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -188,7 +193,7 @@ async def test_remote_workspace_files(http_server: subprocess.Popen[bytes]) -> N
     )
     ctx = _make_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
@@ -198,11 +203,11 @@ async def test_remote_workspace_files(http_server: subprocess.Popen[bytes]) -> N
         "    f.write('created in sandbox')\n"
         "print('wrote file')\n"
     )
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code=code, execution_id="remote-run-3")
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-run-3")
     )
-    assert "wrote file" in result.stdout
-    assert any(f.name == "output.txt" for f in result.output_files)
+    assert "wrote file" in result["stdout"]
+    assert "output.txt" in result["output_files"]
 
 
 @pytest.mark.asyncio
@@ -221,29 +226,23 @@ async def test_remote_variables_and_workspace_persist_across_blocks(
     )
     ctx = _make_ctx(artifact_service, session)  # shared invocation_id => one turn
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
     )
 
-    await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="x = 10\nopen('kept.txt', 'w').write('carried')\n",
-            execution_id="remote-multi-1",
-        ),
+    await tool.run_async(
+        args={"code": "x = 10\nopen('kept.txt', 'w').write('carried')\n"},
+        tool_context=_tool_context(ctx, call_id="remote-multi-1"),
     )
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="print('x*4', x * 4)\nprint('file', open('kept.txt').read())\n",
-            execution_id="remote-multi-2",
-        ),
+    result = await tool.run_async(
+        args={"code": "print('x*4', x * 4)\nprint('file', open('kept.txt').read())\n"},
+        tool_context=_tool_context(ctx, call_id="remote-multi-2"),
     )
 
-    assert "x*4 40" in result.stdout
-    assert "file carried" in result.stdout
+    assert "x*4 40" in result["stdout"]
+    assert "file carried" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -262,36 +261,31 @@ async def test_remote_workspace_deletions_update_host_snapshot(
     )
     ctx = _make_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
     )
 
-    await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="open('roundtrip.txt', 'w').write('same')\n",
-            execution_id="remote-delete-1",
-        ),
+    await tool.run_async(
+        args={"code": "open('roundtrip.txt', 'w').write('same')\n"},
+        tool_context=_tool_context(ctx, call_id="remote-delete-1"),
     )
-    deleted = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="import os\nos.remove('roundtrip.txt')\nprint(os.path.exists('roundtrip.txt'))\n",
-            execution_id="remote-delete-2",
-        ),
+    deleted = await tool.run_async(
+        args={
+            "code": (
+                "import os\nos.remove('roundtrip.txt')\nprint(os.path.exists('roundtrip.txt'))\n"
+            )
+        },
+        tool_context=_tool_context(ctx, call_id="remote-delete-2"),
     )
-    recreated = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="open('roundtrip.txt', 'w').write('same')\n",
-            execution_id="remote-delete-3",
-        ),
+    recreated = await tool.run_async(
+        args={"code": "open('roundtrip.txt', 'w').write('same')\n"},
+        tool_context=_tool_context(ctx, call_id="remote-delete-3"),
     )
 
-    assert "False" in deleted.stdout
-    assert {file.name for file in recreated.output_files} == {"roundtrip.txt"}
+    assert "False" in deleted["stdout"]
+    assert recreated["output_files"] == ["roundtrip.txt"]
 
 
 @pytest.mark.asyncio
@@ -328,17 +322,18 @@ async def test_remote_close_shuts_the_container_down(
     )
     ctx = _make_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=RemoteBackend(url=_server_url(http_server)),
         max_output_chars=10_000,
     )
-    await executor._aexecute(
-        ctx, CodeExecutionInput(code="print('ready')\n", execution_id="remote-shutdown-1")
+    await tool.run_async(
+        args={"code": "print('ready')\n"},
+        tool_context=_tool_context(ctx, call_id="remote-shutdown-1"),
     )
 
     assert http_server.poll() is None  # still serving the turn
-    executor.release_invocation(ctx.invocation_id)
+    await tool.release_invocation(ctx.invocation_id)
 
     for _ in range(200):
         if http_server.poll() is not None:

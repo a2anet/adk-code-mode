@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025-present A2A Net <hello@a2anet.com>
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the host-side frame loop in ``executor``."""
+"""Unit tests for the host-side frame loop in ``tool``."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from adk_code_mode.executor import (
+from adk_code_mode.tool import (
     ProtocolVersionMismatchError,
     _handle_tool_call,
     _host_loop,

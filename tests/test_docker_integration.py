@@ -10,7 +10,7 @@ Skips cleanly if:
 
 The test builds a throwaway ``python:3.13-slim``-based image pinned to the
 freshly built local sandbox wheel, runs a single
-``CodeModeCodeExecutor.execute_code`` round trip through ``UnsafeLocalDockerBackend``, and
+``ExecuteCodeTool.run_async`` round trip through ``UnsafeLocalDockerBackend``, and
 asserts the sandbox's stdout echoed the tool result back.
 """
 
@@ -21,13 +21,13 @@ from unittest.mock import MagicMock
 import pytest
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
-from google.adk.code_executors.code_execution_utils import CodeExecutionInput
 from google.adk.plugins.plugin_manager import PluginManager
 from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
-from adk_code_mode import CodeModeCodeExecutor, UnsafeLocalDockerBackend
+from adk_code_mode import ExecuteCodeTool, UnsafeLocalDockerBackend
 
 from ._docker_helpers import build_sandbox_image, build_sandbox_wheel, docker_ok
 
@@ -72,6 +72,10 @@ def _fake_ctx(artifact_service: InMemoryArtifactService, session: Session) -> In
     return ctx
 
 
+def _tool_context(ctx: InvocationContext, *, call_id: str) -> ToolContext:
+    return ToolContext(invocation_context=ctx, function_call_id=call_id)
+
+
 @pytest.fixture(scope="module")
 def docker_image() -> str:
     if not docker_ok():
@@ -93,7 +97,7 @@ async def test_docker_round_trip(docker_image: str) -> None:
     )
     ctx = _fake_ctx(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[_EchoTool()],
         backend=UnsafeLocalDockerBackend(image=docker_image),
         max_output_chars=10_000,
@@ -101,10 +105,10 @@ async def test_docker_round_trip(docker_image: str) -> None:
     )
     code = "from tools import echo\nr = echo(message='hello from container')\nprint('ECHO:', r)\n"
 
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code=code, execution_id="docker-run-1")
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="docker-run-1")
     )
-    assert "ECHO: {'echoed': 'hello from container'}" in result.stdout
+    assert "ECHO: {'echoed': 'hello from container'}" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -120,7 +124,7 @@ async def test_docker_two_block_turn_preserves_state(docker_image: str) -> None:
     )
     ctx = _fake_ctx(artifact_service, session)  # one invocation_id => one turn
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[],
         backend=UnsafeLocalDockerBackend(image=docker_image),
         max_output_chars=10_000,
@@ -128,23 +132,17 @@ async def test_docker_two_block_turn_preserves_state(docker_image: str) -> None:
     )
 
     # Two blocks of the same turn must run in the same container: the variable
-    # and the /workspace file set in block 1 have to be visible in block 2.
-    await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="turn_value = 99\nopen('turn.txt', 'w').write('kept')\n",
-            execution_id="docker-run-2a",
-        ),
+    # and the workspace file set in block 1 have to be visible in block 2.
+    await tool.run_async(
+        args={"code": "turn_value = 99\nopen('turn.txt', 'w').write('kept')\n"},
+        tool_context=_tool_context(ctx, call_id="docker-run-2a"),
     )
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="print('value', turn_value)\nprint('file', open('turn.txt').read())\n",
-            execution_id="docker-run-2b",
-        ),
+    result = await tool.run_async(
+        args={"code": "print('value', turn_value)\nprint('file', open('turn.txt').read())\n"},
+        tool_context=_tool_context(ctx, call_id="docker-run-2b"),
     )
 
-    assert "value 99" in result.stdout
-    assert "file kept" in result.stdout
+    assert "value 99" in result["stdout"]
+    assert "file kept" in result["stdout"]
 
-    executor.release_invocation(ctx.invocation_id)
+    await tool.release_invocation(ctx.invocation_id)

@@ -42,7 +42,7 @@ async def resolve(
     """Flatten the given inputs into a list of ``ResolvedTool``.
 
     Args:
-        inputs: The mixed sequence passed to ``CodeModeCodeExecutor(tools=...)``.
+        inputs: The mixed sequence passed to ``ExecuteCodeTool(tools=...)``.
         readonly_context: Forwarded to ``BaseToolset.get_tools_with_prefix``.
 
     Returns:

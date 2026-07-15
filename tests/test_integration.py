@@ -12,19 +12,19 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.agents.invocation_context import InvocationContext
+from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
-from google.adk.code_executors.code_execution_utils import CodeExecutionInput, File
 from google.adk.plugins.plugin_manager import PluginManager
 from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
-from adk_code_mode.executor import CodeModeCodeExecutor, ProtocolVersionMismatchError
 from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
 from adk_code_mode.runtime.protocol import PROTOCOL_VERSION, DoneFrame, Frame, ReadyFrame
+from adk_code_mode.tool import ExecuteCodeTool, ProtocolVersionMismatchError
 
 from ._fake_runtime import FakeRuntime
 
@@ -123,11 +123,26 @@ def _make_invocation_context(
     ctx.app_name = "test-app"
     ctx.user_id = "u1"
     ctx.credential_service = None
-    # Tests run ``_aexecute`` directly without firing the model-callback, so
-    # there's no cached resolution to consume; the executor falls back to a
-    # fresh resolve each call (which lets dynamic toolsets see updated state).
+    # Tests call ``run_async`` directly without a real model turn, so there's no
+    # cached resolution to consume; the tool falls back to a fresh resolve each
+    # call (which lets dynamic toolsets see updated state).
     ctx.invocation_id = "test-inv-1"
     return ctx
+
+
+def _tool_context(ctx: InvocationContext, *, call_id: str = "call-1") -> ToolContext:
+    """Wrap a (fake) ``InvocationContext`` the way ADK wraps a real tool call.
+
+    ``call_id`` doubles as the execution id used for stdout/stderr overflow
+    artifact naming, mirroring the old ``CodeExecutionInput.execution_id``.
+    """
+    return ToolContext(invocation_context=ctx, function_call_id=call_id)
+
+
+async def _run(tool: ExecuteCodeTool, ctx: InvocationContext, code: str, *, call_id: str) -> Any:
+    return await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id=call_id)
+    )
 
 
 @pytest.mark.asyncio
@@ -143,16 +158,16 @@ async def test_sandbox_echoes_and_runs_tool() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
+    tool = ExecuteCodeTool(
         tools=[_EchoTool()],
         backend=FakeRuntime(),
         max_output_chars=10_000,
     )
     code = "from tools import echo\nr = echo(message='hello from sandbox')\nprint('ECHO:', r)\n"
 
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-1"))
-    assert "ECHO: {'echoed': 'hello from sandbox'}" in result.stdout
-    assert result.stderr.strip() == ""
+    result = await _run(tool, ctx, code, call_id="run-1")
+    assert "ECHO: {'echoed': 'hello from sandbox'}" in result["stdout"]
+    assert result["stderr"].strip() == ""
 
 
 @pytest.mark.asyncio
@@ -168,11 +183,7 @@ async def test_artifact_helpers_save_list_and_load_json() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
     code = (
         "import json\n"
         "from tools import save_artifact, list_artifacts, load_artifact\n"
@@ -186,9 +197,9 @@ async def test_artifact_helpers_save_list_and_load_json() -> None:
         "print('loaded', json.loads(loaded['data']))\n"
     )
 
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-ws"))
-    assert "report.json" in result.stdout
-    assert "loaded {'ok': True}" in result.stdout
+    result = await _run(tool, ctx, code, call_id="run-ws")
+    assert "report.json" in result["stdout"]
+    assert "loaded {'ok': True}" in result["stdout"]
     keys = await artifact_service.list_artifact_keys(
         app_name="test-app", user_id="u1", session_id="s2"
     )
@@ -196,7 +207,7 @@ async def test_artifact_helpers_save_list_and_load_json() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_inputs_are_staged_and_outputs_are_collected() -> None:
+async def test_workspace_outputs_are_collected_and_saved_as_artifacts() -> None:
     artifact_service = InMemoryArtifactService()
     session = Session(
         id="s2-workspace",
@@ -208,31 +219,21 @@ async def test_workspace_inputs_are_staged_and_outputs_are_collected() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
     code = (
         "import os\n"
         "print('cwd', os.getcwd())\n"
-        "print('input', open('input.txt').read())\n"
-        "with open('input.txt', 'w') as fh:\n"
-        "    fh.write('changed')\n"
         "with open('result.txt', 'w') as fh:\n"
         "    fh.write('created')\n"
     )
 
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code=code,
-            execution_id="run-workspace",
-            input_files=[File(name="input.txt", content=b"hello", mime_type="text/plain")],
-        ),
+    result = await _run(tool, ctx, code, call_id="run-workspace")
+    assert "cwd" in result["stdout"]
+    assert result["output_files"] == ["result.txt"]
+    keys = await artifact_service.list_artifact_keys(
+        app_name="test-app", user_id="u1", session_id="s2-workspace"
     )
-    assert "input hello" in result.stdout
-    assert {file.name for file in result.output_files} == {"input.txt", "result.txt"}
+    assert "result.txt" in keys
 
 
 @pytest.mark.asyncio
@@ -248,11 +249,7 @@ async def test_artifact_helpers_support_binary_content() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
     save = (
         "import base64\n"
@@ -263,7 +260,7 @@ async def test_artifact_helpers_support_binary_content() -> None:
         "    mime_type='application/octet-stream',\n"
         ")\n"
     )
-    await executor._aexecute(ctx, CodeExecutionInput(code=save, execution_id="run-bin-1"))
+    await _run(tool, ctx, save, call_id="run-bin-1")
 
     load = (
         "import base64\n"
@@ -271,9 +268,9 @@ async def test_artifact_helpers_support_binary_content() -> None:
         "blob = load_artifact(filename='blob.bin')\n"
         "print(blob['kind'], base64.b64decode(blob['data']), blob['mime_type'])\n"
     )
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=load, execution_id="run-bin-2"))
+    result = await _run(tool, ctx, load, call_id="run-bin-2")
 
-    assert "bytes b'\\x00\\x01\\x02' application/octet-stream" in result.stdout
+    assert "bytes b'\\x00\\x01\\x02' application/octet-stream" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -289,11 +286,7 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
     first = (
         "from tools import save_artifact\n"
@@ -305,10 +298,10 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
         "    mime_type='text/plain',\n"
         ")\n"
     )
-    # Distinct invocation_ids model two separate turns: /workspace resets between
-    # turns, while Artifacts persist across them.
+    # Distinct invocation_ids model two separate turns: the working directory
+    # resets between turns, while Artifacts persist across them.
     ctx.invocation_id = "inv-fresh-1"
-    await executor._aexecute(ctx, CodeExecutionInput(code=first, execution_id="run-fresh-1"))
+    await _run(tool, ctx, first, call_id="run-fresh-1")
 
     second = (
         "import os\n"
@@ -317,12 +310,10 @@ async def test_workspace_is_fresh_each_turn_while_artifact_helpers_persist() -> 
         "print('artifact_value', load_artifact(filename='persist.txt')['data'])\n"
     )
     ctx.invocation_id = "inv-fresh-2"
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code=second, execution_id="run-fresh-2")
-    )
+    result = await _run(tool, ctx, second, call_id="run-fresh-2")
 
-    assert "workspace_has_temp False" in result.stdout
-    assert "artifact_value artifact persisted" in result.stdout
+    assert "workspace_has_temp False" in result["stdout"]
+    assert "artifact_value artifact persisted" in result["stdout"]
 
 
 @pytest.mark.asyncio
@@ -338,17 +329,13 @@ async def test_oversize_stdout_is_truncated_and_spilled() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=500,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=500)
     code = "print('x' * 5000)\n"
 
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-big"))
-    assert "Output exceeded 500 characters" in result.stdout
-    assert "Full stdout was saved as an artifact" in result.stdout
-    assert "load_artifact(filename='code_mode/stdout/run-big.txt')" in result.stdout
+    result = await _run(tool, ctx, code, call_id="run-big")
+    assert "Output exceeded 500 characters" in result["stdout"]
+    assert "Full stdout was saved as an artifact" in result["stdout"]
+    assert "load_artifact(filename='code_mode/stdout/run-big.txt')" in result["stdout"]
     keys = await artifact_service.list_artifact_keys(
         app_name="test-app", user_id="u1", session_id="s3"
     )
@@ -368,18 +355,11 @@ async def test_timeout_terminates_hung_sandbox() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=500,
-        timeout_seconds=1,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=500, timeout_seconds=1)
 
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="while True:\n    pass\n", execution_id="run-timeout")
-    )
-    assert result.stdout == ""
-    assert "Execution exceeded timeout of 1s" in result.stderr
+    result = await _run(tool, ctx, "while True:\n    pass\n", call_id="run-timeout")
+    assert result["stdout"] == ""
+    assert "Execution exceeded timeout of 1s" in result["stderr"]
 
 
 @pytest.mark.asyncio
@@ -395,27 +375,20 @@ async def test_timeout_does_not_wait_for_in_flight_tool_call() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[_SlowTool()],
-        backend=FakeRuntime(),
-        max_output_chars=500,
-        timeout_seconds=1,
+    tool = ExecuteCodeTool(
+        tools=[_SlowTool()], backend=FakeRuntime(), max_output_chars=500, timeout_seconds=1
     )
 
     start = time.monotonic()
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="from tools import slow\nprint(slow())\n",
-            execution_id="run-tool-timeout",
-        ),
+    result = await _run(
+        tool, ctx, "from tools import slow\nprint(slow())\n", call_id="run-tool-timeout"
     )
     elapsed = time.monotonic() - start
 
     assert elapsed < 1.8
-    assert result.stdout == ""
-    assert "Execution exceeded timeout of 1s" in result.stderr
-    assert "Process exited with code" not in result.stderr
+    assert result["stdout"] == ""
+    assert "Execution exceeded timeout of 1s" in result["stderr"]
+    assert "Process exited with code" not in result["stderr"]
 
 
 @pytest.mark.asyncio
@@ -431,19 +404,12 @@ async def test_nonzero_exit_code_is_reported() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(code="import sys\nsys.exit(2)\n", execution_id="run-exit"),
-    )
+    result = await _run(tool, ctx, "import sys\nsys.exit(2)\n", call_id="run-exit")
 
-    assert result.stdout == ""
-    assert result.stderr == "Process exited with code 2."
+    assert result["stdout"] == ""
+    assert result["stderr"] == "Process exited with code 2."
 
 
 @pytest.mark.asyncio
@@ -459,19 +425,12 @@ async def test_traceback_also_includes_exit_code_marker() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(code="raise ValueError('bad')\n", execution_id="run-traceback"),
-    )
+    result = await _run(tool, ctx, "raise ValueError('bad')\n", call_id="run-traceback")
 
-    assert "ValueError: bad" in result.stderr
-    assert result.stderr.rstrip().endswith("Process exited with code 1.")
+    assert "ValueError: bad" in result["stderr"]
+    assert result["stderr"].rstrip().endswith("Process exited with code 1.")
 
 
 @pytest.mark.asyncio
@@ -487,23 +446,16 @@ async def test_syntax_error_also_includes_exit_code_marker() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
-    )
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(code="if True print('bad')\n", execution_id="run-syntax"),
-    )
+    result = await _run(tool, ctx, "if True print('bad')\n", call_id="run-syntax")
 
-    assert "SyntaxError" in result.stderr
-    assert result.stderr.rstrip().endswith("Process exited with code 1.")
+    assert "SyntaxError" in result["stderr"]
+    assert result["stderr"].rstrip().endswith("Process exited with code 1.")
 
 
 @pytest.mark.asyncio
-async def test_prepare_tool_surface_re_resolves_dynamic_toolsets_without_invocation_cache() -> None:
+async def test_get_or_resolve_tools_re_resolves_dynamic_toolsets_per_invocation() -> None:
     artifact_service = InMemoryArtifactService()
     session = Session(
         id="s5",
@@ -515,16 +467,15 @@ async def test_prepare_tool_surface_re_resolves_dynamic_toolsets_without_invocat
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[_DynamicToolset()],
-        backend=FakeRuntime(),
-    )
+    tool = ExecuteCodeTool(tools=[_DynamicToolset()], backend=FakeRuntime())
 
     ctx.invocation_id = "test-inv-alpha"
-    first = await executor._prepare_tool_surface(ctx)
+    first_ns = await tool._get_or_resolve_tools(_tool_context(ctx))
+    first = tool._prepare_tool_surface(first_ns)
     session.state["which"] = "beta"
     ctx.invocation_id = "test-inv-beta"
-    second = await executor._prepare_tool_surface(ctx)
+    second_ns = await tool._get_or_resolve_tools(_tool_context(ctx))
+    second = tool._prepare_tool_surface(second_ns)
 
     assert "dynamic/alpha.py" in first.tools_map
     assert "dynamic/beta.py" in second.tools_map
@@ -544,16 +495,14 @@ async def test_optional_stub_args_are_omitted_when_unspecified() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    executor = CodeModeCodeExecutor(
-        tools=[_OptionalArgTool()],
-        backend=FakeRuntime(),
-        max_output_chars=10_000,
+    tool = ExecuteCodeTool(
+        tools=[_OptionalArgTool()], backend=FakeRuntime(), max_output_chars=10_000
     )
     code = "from tools import optional_lookup\nprint(optional_lookup())\n"
 
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-opt"))
-    assert "'has_record_id': False" in result.stdout
-    assert result.stderr.strip() == ""
+    result = await _run(tool, ctx, code, call_id="run-opt")
+    assert "'has_record_id': False" in result["stdout"]
+    assert result["stderr"].strip() == ""
 
 
 # --- Turn-scoped session tests -------------------------------------------------
@@ -631,162 +580,119 @@ def _fresh_ctx(session_id: str, invocation_id: str) -> InvocationContext:
 @pytest.mark.asyncio
 async def test_variables_persist_across_blocks_within_a_turn() -> None:
     ctx = _fresh_ctx("s-persist-vars", "inv-persist-vars")
-    executor = CodeModeCodeExecutor(tools=[], backend=_CountingBackend(), max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=_CountingBackend(), max_output_chars=10_000)
 
-    await executor._aexecute(ctx, CodeExecutionInput(code="x = 41\n", execution_id="b1"))
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="print('x+1', x + 1)\n", execution_id="b2")
-    )
+    await _run(tool, ctx, "x = 41\n", call_id="b1")
+    result = await _run(tool, ctx, "print('x+1', x + 1)\n", call_id="b2")
 
-    assert "x+1 42" in result.stdout
-    assert result.stderr.strip() == ""
+    assert "x+1 42" in result["stdout"]
+    assert result["stderr"].strip() == ""
     # Both blocks reused a single container.
-    assert executor.backend.starts == 1  # type: ignore[attr-defined]
+    assert tool._backend.starts == 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 async def test_workspace_file_persists_across_blocks_within_a_turn() -> None:
     ctx = _fresh_ctx("s-persist-ws", "inv-persist-ws")
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    await executor._aexecute(
-        ctx,
-        CodeExecutionInput(code="open('carry.txt', 'w').write('kept')\n", execution_id="b1"),
-    )
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(code="print('carry', open('carry.txt').read())\n", execution_id="b2"),
-    )
+    await _run(tool, ctx, "open('carry.txt', 'w').write('kept')\n", call_id="b1")
+    result = await _run(tool, ctx, "print('carry', open('carry.txt').read())\n", call_id="b2")
 
-    assert "carry kept" in result.stdout
+    assert "carry kept" in result["stdout"]
 
 
 @pytest.mark.asyncio
 async def test_distinct_invocations_get_distinct_sessions_and_no_state_leak() -> None:
     backend = _CountingBackend()
-    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
 
     ctx_a = _fresh_ctx("s-distinct-a", "inv-distinct-a")
-    await executor._aexecute(ctx_a, CodeExecutionInput(code="secret = 7\n", execution_id="a1"))
+    await _run(tool, ctx_a, "secret = 7\n", call_id="a1")
 
     ctx_b = _fresh_ctx("s-distinct-b", "inv-distinct-b")
-    result = await executor._aexecute(
-        ctx_b,
-        CodeExecutionInput(code="print('has_secret', 'secret' in dir())\n", execution_id="b1"),
-    )
+    result = await _run(tool, ctx_b, "print('has_secret', 'secret' in dir())\n", call_id="b1")
 
     assert backend.starts == 2
-    assert "has_secret False" in result.stdout
-    assert len(executor._sessions) == 2
+    assert "has_secret False" in result["stdout"]
+    assert len(tool._turns) == 2
 
 
 @pytest.mark.asyncio
 async def test_release_invocation_closes_the_turn_session() -> None:
     ctx = _fresh_ctx("s-release", "inv-release")
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
-    turn = executor._sessions["inv-release"]
+    await _run(tool, ctx, "print('hi')\n", call_id="b1")
+    turn = tool._turns["inv-release"]
 
-    executor.release_invocation("inv-release")
-    assert "inv-release" not in executor._sessions  # popped synchronously
-
-    for _ in range(50):
-        if turn.session._closed:  # type: ignore[attr-defined]
-            break
-        await asyncio.sleep(0.01)
+    await tool.release_invocation("inv-release")
+    assert "inv-release" not in tool._turns
     assert turn.session._closed is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 async def test_idle_reaper_closes_stale_sessions() -> None:
     ctx = _fresh_ctx("s-reap", "inv-reap")
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
-    executor.session_idle_timeout_seconds = 0.01
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+    tool._session_idle_timeout_seconds = 0.01
 
-    await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
-    turn = executor._sessions["inv-reap"]
+    await _run(tool, ctx, "print('hi')\n", call_id="b1")
+    turn = tool._turns["inv-reap"]
     turn.last_used = time.monotonic() - 100.0
 
-    await executor._reap_once()
+    await tool._reap_once()
 
-    assert "inv-reap" not in executor._sessions
+    assert "inv-reap" not in tool._turns
     assert turn.session._closed is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 async def test_per_block_output_files_reflect_only_that_blocks_changes() -> None:
     ctx = _fresh_ctx("s-outputs", "inv-outputs")
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
 
-    first = await executor._aexecute(
-        ctx, CodeExecutionInput(code="open('a.txt', 'w').write('A')\n", execution_id="b1")
-    )
-    second = await executor._aexecute(
-        ctx, CodeExecutionInput(code="open('b.txt', 'w').write('B')\n", execution_id="b2")
-    )
+    first = await _run(tool, ctx, "open('a.txt', 'w').write('A')\n", call_id="b1")
+    second = await _run(tool, ctx, "open('b.txt', 'w').write('B')\n", call_id="b2")
 
-    assert {f.name for f in first.output_files} == {"a.txt"}
+    assert set(first["output_files"]) == {"a.txt"}
     # a.txt is unchanged in block 2, so only b.txt is reported.
-    assert {f.name for f in second.output_files} == {"b.txt"}
-
-
-@pytest.mark.asyncio
-async def test_freshly_staged_inputs_are_not_reported_as_outputs() -> None:
-    ctx = _fresh_ctx("s-staged", "inv-staged")
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime(), max_output_chars=10_000)
-
-    result = await executor._aexecute(
-        ctx,
-        CodeExecutionInput(
-            code="open('made.txt', 'w').write('new')\n",
-            execution_id="b1",
-            input_files=[File(name="given.txt", content=b"unchanged", mime_type="text/plain")],
-        ),
-    )
-
-    names = {f.name for f in result.output_files}
-    assert "given.txt" not in names
-    assert names == {"made.txt"}
+    assert set(second["output_files"]) == {"b.txt"}
 
 
 @pytest.mark.asyncio
 async def test_tool_surface_stays_consistent_across_blocks() -> None:
     ctx = _fresh_ctx("s-surface", "inv-surface")
-    executor = CodeModeCodeExecutor(
-        tools=[_EchoTool()], backend=_CountingBackend(), max_output_chars=10_000
-    )
+    tool = ExecuteCodeTool(tools=[_EchoTool()], backend=_CountingBackend(), max_output_chars=10_000)
 
     call = "from tools import echo\nprint('E', echo(message='hi'))\n"
-    await executor._aexecute(ctx, CodeExecutionInput(code=call, execution_id="b1"))
-    prepared_after_first = executor._sessions["inv-surface"].prepared
-    result = await executor._aexecute(ctx, CodeExecutionInput(code=call, execution_id="b2"))
+    await _run(tool, ctx, call, call_id="b1")
+    prepared_after_first = tool._turns["inv-surface"].prepared
+    result = await _run(tool, ctx, call, call_id="b2")
 
-    assert "E {'echoed': 'hi'}" in result.stdout
-    # The turn reuses one prepared surface (registry + /tools) across blocks.
-    assert executor._sessions["inv-surface"].prepared is prepared_after_first
-    assert executor.backend.starts == 1  # type: ignore[attr-defined]
+    assert "E {'echoed': 'hi'}" in result["stdout"]
+    # The turn reuses one prepared surface (registry + tools tree) across blocks.
+    assert tool._turns["inv-surface"].prepared is prepared_after_first
+    assert tool._backend.starts == 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 async def test_reconnects_once_after_mid_turn_connection_loss() -> None:
     ctx = _fresh_ctx("s-reconnect", "inv-reconnect")
     backend = _ConnectionLostOnceBackend()
-    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="print('after reconnect')\n", execution_id="b1")
-    )
+    result = await _run(tool, ctx, "print('after reconnect')\n", call_id="b1")
 
     assert backend.starts == 2  # dead session dropped, reconnected once
-    assert "after reconnect" in result.stdout
+    assert "after reconnect" in result["stdout"]
 
 
 class _DropAtWaitSession:
     """RunFrame is accepted, but the connection drops before the OutputFrame.
 
     ``done_frames`` controls whether a ``DoneFrame`` arrives first: with one the
-    executor can tell the code ran (``RAN``); with none it cannot (``UNKNOWN``).
+    tool can tell the code ran (``RAN``); with none it cannot (``UNKNOWN``).
     """
 
     def __init__(self, *, done: bool) -> None:
@@ -847,32 +753,28 @@ class _SingleSessionBackend:
 async def test_unknown_execution_is_reported_and_not_retried() -> None:
     ctx = _fresh_ctx("s-unknown", "inv-unknown")
     backend = _SingleSessionBackend(_DropAtWaitSession(done=False))
-    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
-    )
+    result = await _run(tool, ctx, "side_effect()\n", call_id="b1")
 
     # Code may have run, so we must not re-run it: one start, a message, no output.
     assert backend.starts == 1
-    assert "unknown whether it executed" in result.stderr
-    assert result.stdout == ""
+    assert "unknown whether it executed" in result["stderr"]
+    assert result["stdout"] == ""
 
 
 @pytest.mark.asyncio
 async def test_completed_execution_with_lost_output_is_reported_and_not_retried() -> None:
     ctx = _fresh_ctx("s-ran", "inv-ran")
     backend = _SingleSessionBackend(_DropAtWaitSession(done=True))
-    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
 
-    result = await executor._aexecute(
-        ctx, CodeExecutionInput(code="side_effect()\n", execution_id="b1")
-    )
+    result = await _run(tool, ctx, "side_effect()\n", call_id="b1")
 
     # DoneFrame arrived, so we know it ran: one start, a message, no re-run.
     assert backend.starts == 1
-    assert "already executed" in result.stderr
-    assert result.stdout == ""
+    assert "already executed" in result["stderr"]
+    assert result["stdout"] == ""
 
 
 @pytest.mark.asyncio
@@ -880,14 +782,10 @@ async def test_protocol_mismatch_discards_and_closes_cached_turn() -> None:
     ctx = _fresh_ctx("s-protocol", "inv-protocol")
     session = _MismatchedReadySession()
     backend = _SingleSessionBackend(session)
-    executor = CodeModeCodeExecutor(tools=[], backend=backend, max_output_chars=10_000)
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
 
     with pytest.raises(ProtocolVersionMismatchError):
-        await executor._aexecute(ctx, CodeExecutionInput(code="print('hi')\n", execution_id="b1"))
+        await _run(tool, ctx, "print('hi')\n", call_id="b1")
 
-    assert "inv-protocol" not in executor._sessions
-    for _ in range(50):
-        if session.closed:
-            break
-        await asyncio.sleep(0.01)
+    assert "inv-protocol" not in tool._turns
     assert session.closed is True

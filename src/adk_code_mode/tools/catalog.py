@@ -6,10 +6,9 @@
 The catalog is grouped by module: ``# tools.<namespace>`` sections (sorted),
 then ``# tools`` for any top-level tools. Each section opens with an import
 line and is followed by ``.pyi``-style function definitions (signature +
-docstring + ``...`` body). The callback
-(``adk_code_mode.callback.code_mode_before_model_callback``) wraps the result
-in ``<tools>`` / ``</tools>`` tags before appending it to the system prompt;
-this module returns just the inner content.
+docstring + ``...`` body). ``ExecuteCodeTool.process_llm_request`` wraps the
+result in ``<code-mode>`` / ``</code-mode>`` tags before appending it to the
+system instruction; this module returns just the inner content.
 """
 
 from __future__ import annotations
@@ -70,26 +69,6 @@ def render_catalog(namespaced: list[NamespacedTool]) -> str:
     return "\n".join(sections)
 
 
-_OVERFLOW_PROSE = (
-    "A `tools` package is available in the sandbox. List `/tools/` with "
-    "`pathlib.Path('/tools').iterdir()`. Each entry is either a `.py` file "
-    "(a top-level tool, importable as `from tools import <name>`) or a "
-    "subdirectory (a namespace, with tools importable as "
-    "`from tools.<namespace> import <name>`). To see a tool's signature and "
-    "docstring, read its `.py` file with `open(...).read()`."
-)
-
-
-def render_overflow_catalog() -> str:
-    """Catalog body used when the full catalog exceeds ``max_catalog_chars``.
-
-    Drops every tool section in favour of a prose explanation of how the
-    model can navigate ``/tools/`` from Python.
-    """
-    return _OVERFLOW_PROSE
-
-
 __all__ = [
     "render_catalog",
-    "render_overflow_catalog",
 ]

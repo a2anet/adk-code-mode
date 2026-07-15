@@ -294,6 +294,20 @@ class ExecuteCodeTool(BaseTool):
         if eager_resolved:
             namespacing.build(eager_resolved)
 
+    @property
+    def tools(self) -> Sequence[BaseTool | BaseToolset]:
+        """Tools and toolsets available inside the sandbox, including built-in artifact tools.
+
+        Host apps that own a toolset's lifecycle (e.g. an ``McpToolset`` needing
+        ``close()`` on shutdown) need this to find it again after construction.
+        """
+        return self._tools
+
+    @property
+    def backend(self) -> SandboxBackend:
+        """The configured sandbox runtime backend."""
+        return self._backend
+
     def _get_declaration(self) -> genai_types.FunctionDeclaration | None:
         return genai_types.FunctionDeclaration(
             name=self.name,

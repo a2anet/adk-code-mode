@@ -69,6 +69,16 @@ def test_declaration_exposes_a_single_code_parameter() -> None:
     assert decl.parameters_json_schema["required"] == ["code"]
 
 
+def test_tools_and_backend_properties_expose_the_configured_surface() -> None:
+    schema_tool = _SchemaTool("ping", "Ping.")
+    backend = FakeRuntime()
+
+    tool = ExecuteCodeTool(tools=[schema_tool], backend=backend)
+
+    assert schema_tool in tool.tools
+    assert tool.backend is backend
+
+
 @pytest.mark.asyncio
 async def test_process_llm_request_declares_the_tool() -> None:
     tool = _make_tool([])

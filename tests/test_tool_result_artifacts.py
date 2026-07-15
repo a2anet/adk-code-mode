@@ -120,6 +120,11 @@ async def test_large_result_elided_with_reload_tip() -> None:
     )
     assert set(result) == {"tool_result_artifact", "note"}
     assert result["tool_result_artifact"] == ctx.saved[0]["filename"]
+    assert result["note"] == (
+        "The tool result (112 bytes) was saved as an artifact "
+        "'search_call-1.json' instead of being returned inline. Reload it with "
+        "load_artifact(filename='search_call-1.json')."
+    )
     assert json.loads(ctx.saved[0]["artifact"].inline_data.data) == big  # full payload persisted
 
 

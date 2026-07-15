@@ -347,7 +347,8 @@ async def test_oversize_stdout_is_truncated_and_spilled() -> None:
 
     result = await executor._aexecute(ctx, CodeExecutionInput(code=code, execution_id="run-big"))
     assert "Output exceeded 500 characters" in result.stdout
-    assert "Full stdout saved as artifact" in result.stdout
+    assert "Full stdout was saved as an artifact" in result.stdout
+    assert "load_artifact(filename='code_mode/stdout/run-big.txt')" in result.stdout
     keys = await artifact_service.list_artifact_keys(
         app_name="test-app", user_id="u1", session_id="s3"
     )

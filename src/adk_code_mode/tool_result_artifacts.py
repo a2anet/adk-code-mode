@@ -135,9 +135,9 @@ class ToolResultArtifactTool(BaseTool):
             return {
                 "tool_result_artifact": filename,
                 "note": (
-                    f"The tool result ({len(data):,} bytes) was saved as artifact "
-                    f"{filename!r} instead of returned inline. Reload it with "
-                    f"load_artifact({filename!r})."
+                    f"The tool result ({len(data):,} bytes) was saved as an artifact "
+                    f"{filename!r} instead of being returned inline. Reload it with "
+                    f"load_artifact(filename={filename!r})."
                 ),
             }
         return result

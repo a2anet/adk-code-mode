@@ -9,10 +9,6 @@ import hashlib
 import os
 
 
-def hash_bytes(data: bytes) -> str:
-    return hashlib.blake2s(data, digest_size=16).hexdigest()
-
-
 def hash_file(path: str) -> tuple[str, int]:
     """Return ``(blake2s_hex, size)`` for a file on disk."""
     hasher = hashlib.blake2s(digest_size=16)
@@ -41,4 +37,4 @@ def walk_workspace(root: str) -> list[str]:
     return out
 
 
-__all__ = ["hash_bytes", "hash_file", "walk_workspace"]
+__all__ = ["hash_file", "walk_workspace"]

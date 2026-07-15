@@ -611,7 +611,9 @@ class ExecuteCodeTool(BaseTool):
             return []
         saved: list[str] = []
         for file in files:
-            data = file.content if isinstance(file.content, bytes) else file.content.encode("utf-8")
+            data = (
+                file.content if isinstance(file.content, bytes) else base64.b64decode(file.content)
+            )
             await tool_context.save_artifact(
                 filename=file.name,
                 artifact=genai_types.Part(

@@ -58,19 +58,20 @@ class SandboxFiles:
 class SandboxSession(Protocol):
     """Live session with a running sandbox that runs N code blocks per turn.
 
-    Per-block contract, driven by the executor and implemented identically by
-    every backend: ``begin_block`` (stage inputs) → ``send`` the ``RunFrame`` →
-    drain ``frames`` until the ``DoneFrame`` → ``wait`` (read the block's
+    Per-block contract, driven by ``ExecuteCodeTool`` and implemented
+    identically by every backend: ``begin_block`` → ``send`` the ``RunFrame``
+    → drain ``frames`` until the ``DoneFrame`` → ``wait`` (read the block's
     ``OutputFrame``). ``close`` ends the turn.
     """
 
     async def begin_block(self, input_paths: Sequence[str]) -> None:
-        """Stage this block's freshly-written inputs into the sandbox.
+        """Run the per-block handshake immediately before the block's ``RunFrame``.
 
-        Called immediately before the block's ``RunFrame``. ``input_paths`` are
-        posix-relative paths under the turn workspace that were staged for this
-        block. Tar-based backends (``RemoteBackend``) upload just those files;
-        mount-based backends (Docker) are a no-op — the workspace is bind-mounted.
+        ``input_paths`` is always empty today — ``ExecuteCodeTool`` has no
+        per-block input-file side channel — but the call still happens every
+        block. Tar-based backends (``RemoteBackend``) still send a (possibly
+        empty) workspace tar to keep the frame order fixed; mount-based
+        backends (Docker) are a no-op — the workspace is bind-mounted.
         """
         ...
 

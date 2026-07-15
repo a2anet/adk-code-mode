@@ -9,11 +9,6 @@ import tempfile
 from adk_code_mode.workspace import files
 
 
-def test_hash_bytes_stable() -> None:
-    assert files.hash_bytes(b"hello") == files.hash_bytes(b"hello")
-    assert files.hash_bytes(b"hello") != files.hash_bytes(b"world")
-
-
 def test_walk_workspace_sorted_relative() -> None:
     with tempfile.TemporaryDirectory() as root:
         os.makedirs(os.path.join(root, "nested", "deep"))

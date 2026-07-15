@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.4.0...adk-code-mode-v0.4.1) (2026-07-10)
+
+
+### Documentation
+
+* note the sandbox writes to `/tools` in remote deployment guide ([96bb45e](https://github.com/a2anet/adk-code-mode/commit/96bb45e4e18d9d54709f4c10b6b09cf3567ee385))
+
 ## [0.4.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.3.0...adk-code-mode-v0.4.0) (2026-07-09)
 
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.4.1...adk-code-mode-v1.0.0) (2026-07-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* `CodeModeCodeExecutor`, `code_mode_before_model_callback`, and `CODE_MODE_SYSTEM_INSTRUCTION` no longer exist. Add `ExecuteCodeTool` to the agent's `tools=[...]` instead of wiring `code_executor=`; drop `before_model_callback=`, `generate_content_config=`, and `CODE_MODE_SYSTEM_INSTRUCTION` entirely; `release_invocation` is now `async`. See the README's migration section.
+
+### Features
+
+* replace `CodeModeCodeExecutor` with `ExecuteCodeTool` ([#10](https://github.com/a2anet/adk-code-mode/issues/10)) ([b78572e](https://github.com/a2anet/adk-code-mode/commit/b78572e72446930548760756255390d1a3cc388a))
+
 ## [0.4.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.4.0...adk-code-mode-v0.4.1) (2026-07-10)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.0.0...adk-code-mode-v1.1.0) (2026-07-15)
+
+
+### Features
+
+* expose `tools` and `backend` as public properties on `ExecuteCodeTool` ([acfb704](https://github.com/a2anet/adk-code-mode/commit/acfb704d388da5d66e318775e03fe055467679c2))
+
 ## [1.0.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v0.4.1...adk-code-mode-v1.0.0) (2026-07-15)
 
 

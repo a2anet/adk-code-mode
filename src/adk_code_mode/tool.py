@@ -33,7 +33,7 @@ import weakref
 from collections.abc import Awaitable, Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.code_executors.code_execution_utils import File
@@ -140,6 +140,50 @@ _FUNCTION_STUBS_PREAMBLE = (
 
 ArtifactsSavedCallback = Callable[[InvocationContext, dict[str, int]], Awaitable[None]]
 
+_T = TypeVar("_T")
+
+
+@dataclasses.dataclass(frozen=True)
+class _WeakContextEntry(Generic[_T]):
+    ref: weakref.ReferenceType[InvocationContext]
+    value: _T
+
+
+class _WeakContextCache(Generic[_T]):
+    """Weak identity map for unhashable ``InvocationContext`` objects."""
+
+    def __init__(self) -> None:
+        self._items: dict[int, _WeakContextEntry[_T]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, context: InvocationContext) -> _T | None:
+        key = id(context)
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if entry.ref() is context:
+                return entry.value
+            del self._items[key]
+        return None
+
+    def set(self, context: InvocationContext, value: _T) -> None:
+        key = id(context)
+
+        def remove(ref: weakref.ReferenceType[InvocationContext], key: int = key) -> None:
+            with self._lock:
+                entry = self._items.get(key)
+                if entry is not None and entry.ref is ref:
+                    del self._items[key]
+
+        ref = weakref.ref(context, remove)
+        with self._lock:
+            self._items[key] = _WeakContextEntry(ref=ref, value=value)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
 
 class ExecuteCodeTool(BaseTool):
     """Execute model-written Python in a sandbox with access to ADK tools."""
@@ -231,8 +275,10 @@ class ExecuteCodeTool(BaseTool):
         self._session_idle_timeout_seconds = session_idle_timeout_seconds
         self._on_artifacts_saved = on_artifacts_saved
 
-        self._resolved_tools: dict[str, list[namespacing.NamespacedTool]] = {}
-        self._resolved_tools_lock = threading.Lock()
+        self._resolved_tools: _WeakContextCache[tuple[str, list[namespacing.NamespacedTool]]] = (
+            _WeakContextCache()
+        )
+        self._execution_locks: _WeakContextCache[asyncio.Lock] = _WeakContextCache()
         self._turns: dict[str, _TurnSession] = {}
         self._turns_lock = threading.Lock()
         self._reaper_task: asyncio.Task[None] | None = None
@@ -281,6 +327,12 @@ class ExecuteCodeTool(BaseTool):
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
         self._ensure_reaper_started()
 
+        invocation_context = tool_context._invocation_context
+        lock = self._get_execution_lock(invocation_context)
+        async with lock:
+            return await self._run_async_locked(args=args, tool_context=tool_context)
+
+    async def _run_async_locked(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
         code = args["code"]
         if self._max_code_chars and len(code) > self._max_code_chars:
             return {
@@ -354,8 +406,6 @@ class ExecuteCodeTool(BaseTool):
         is a backstop for turns that never reach this call. No-op when the
         invocation never called ``execute_code``.
         """
-        with self._resolved_tools_lock:
-            self._resolved_tools.pop(invocation_id, None)
         with self._turns_lock:
             turn = self._turns.pop(invocation_id, None)
         if turn is not None:
@@ -366,6 +416,13 @@ class ExecuteCodeTool(BaseTool):
             return
         self._reaper_task = asyncio.create_task(_reap_idle_turns(weakref.ref(self)))
 
+    def _get_execution_lock(self, invocation_context: InvocationContext) -> asyncio.Lock:
+        lock = self._execution_locks.get(invocation_context)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._execution_locks.set(invocation_context, lock)
+        return lock
+
     async def _get_or_resolve_tools(
         self, tool_context: ToolContext
     ) -> list[namespacing.NamespacedTool]:
@@ -375,15 +432,20 @@ class ExecuteCodeTool(BaseTool):
         (stub tree for a new turn) so a toolset is only resolved once per
         invocation regardless of which runs first.
         """
-        invocation_id = tool_context.invocation_id
-        with self._resolved_tools_lock:
-            cached = self._resolved_tools.get(invocation_id)
-        if cached is not None:
-            return cached
+        invocation_context = tool_context._invocation_context
+        cached_entry = self._resolved_tools.get(invocation_context)
+        if cached_entry is not None:
+            cached_invocation_id, cached = cached_entry
+            if cached_invocation_id == tool_context.invocation_id:
+                return cached
         resolved = await normaliser.resolve(list(self._tools), tool_context)
         ns_tools = namespacing.build(self._apply_tool_result_wrapping(resolved))
-        with self._resolved_tools_lock:
-            self._resolved_tools[invocation_id] = ns_tools
+        cached_entry = self._resolved_tools.get(invocation_context)
+        if cached_entry is not None:
+            cached_invocation_id, cached = cached_entry
+            if cached_invocation_id == tool_context.invocation_id:
+                return cached
+        self._resolved_tools.set(invocation_context, (tool_context.invocation_id, ns_tools))
         return ns_tools
 
     def _prepare_tool_surface(

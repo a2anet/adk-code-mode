@@ -12,6 +12,8 @@ standalone callback no longer exists; its behavior now lives in
 
 from __future__ import annotations
 
+import gc
+import weakref
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -145,3 +147,20 @@ async def test_get_or_resolve_tools_is_cached_per_invocation() -> None:
     second = await tool._get_or_resolve_tools(ctx)
 
     assert first is second
+
+
+@pytest.mark.asyncio
+async def test_resolved_tool_cache_releases_with_invocation_context() -> None:
+    tool = _make_tool([_SchemaTool("ping")])
+    ctx = _tool_context("inv-weak")
+    context_ref = weakref.ref(ctx._invocation_context)
+
+    await tool._get_or_resolve_tools(ctx)
+    assert len(tool._resolved_tools) == 1
+
+    del ctx
+    for _ in range(3):
+        gc.collect()
+
+    assert context_ref() is None
+    assert len(tool._resolved_tools) == 0

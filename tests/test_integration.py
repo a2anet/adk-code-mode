@@ -592,6 +592,29 @@ async def test_variables_persist_across_blocks_within_a_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_parallel_execute_code_calls_are_serialized_by_turn_order() -> None:
+    ctx = _fresh_ctx("s-parallel", "inv-parallel")
+    backend = _CountingBackend()
+    tool = ExecuteCodeTool(tools=[], backend=backend, max_output_chars=10_000)
+
+    first_task = asyncio.create_task(
+        _run(
+            tool,
+            ctx,
+            "import time\ntime.sleep(0.2)\nx = 123\nprint('first set x')\n",
+            call_id="b1",
+        )
+    )
+    second_task = asyncio.create_task(_run(tool, ctx, "print('second saw', x)\n", call_id="b2"))
+
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert "first set x" in first["stdout"]
+    assert "second saw 123" in second["stdout"]
+    assert backend.starts == 1
+
+
+@pytest.mark.asyncio
 async def test_workspace_file_persists_across_blocks_within_a_turn() -> None:
     ctx = _fresh_ctx("s-persist-ws", "inv-persist-ws")
     tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=10_000)

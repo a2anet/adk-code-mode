@@ -6,8 +6,8 @@
 ``ToolResultArtifactTool`` wraps a ``BaseTool`` so that every call's return value
 is written to a session artifact (via ``ToolContext.save_artifact``) and tagged
 with ``code_mode.tool_result = "true"``. Enable it with
-``CodeModeCodeExecutor(save_tool_results_as_artifacts=True)`` (the default);
-the executor applies the wrapper to the resolved tool surface.
+``ExecuteCodeTool(save_tool_results_as_artifacts=True)`` (the default);
+``ExecuteCodeTool`` applies the wrapper to the resolved tool surface.
 
 Naming is transparent by default: the artifact filename is derived from the tool
 name and call id. The model may optionally pass ``artifact_name`` /
@@ -135,9 +135,9 @@ class ToolResultArtifactTool(BaseTool):
             return {
                 "tool_result_artifact": filename,
                 "note": (
-                    f"The tool result ({len(data):,} bytes) was saved as artifact "
-                    f"{filename!r} instead of returned inline. Reload it with "
-                    f"load_artifact({filename!r})."
+                    f"The tool result ({len(data):,} bytes) was saved as an artifact "
+                    f"{filename!r} instead of being returned inline. Reload it with "
+                    f"load_artifact(filename={filename!r})."
                 ),
             }
         return result

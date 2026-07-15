@@ -50,7 +50,7 @@ async def truncate(
         return TruncationResult(text=text, artifact_filename=None, artifact_version=None)
 
     if invocation_context.artifact_service is None:
-        marker = f"\n---\nOutput exceeded {limit:,} characters. Try again with a smaller output."
+        marker = f"\n---\nOutput exceeded {limit:,} characters. Try again with less output."
         return TruncationResult(
             text=_head_tail(text, limit) + marker, artifact_filename=None, artifact_version=None
         )
@@ -71,8 +71,9 @@ async def truncate(
     )
     marker = (
         f"\n---\n"
-        f"Output exceeded {limit:,} characters. Try again with a smaller output.\n"
-        f"Full {stream_name} saved as artifact: {filename}"
+        f"Output exceeded {limit:,} characters. Try again with less output.\n"
+        f"Full {stream_name} was saved as an artifact: {filename!r}. "
+        f"Reload it with load_artifact(filename={filename!r})."
     )
     return TruncationResult(
         text=_head_tail(text, limit) + marker,

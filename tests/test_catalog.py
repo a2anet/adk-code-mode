@@ -7,7 +7,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.genai import types as genai_types
 
 from adk_code_mode.tools import namespacing
-from adk_code_mode.tools.catalog import render_catalog, render_overflow_catalog
+from adk_code_mode.tools.catalog import render_catalog
 from adk_code_mode.tools.normaliser import ResolvedTool
 
 
@@ -81,18 +81,6 @@ def test_render_catalog_includes_top_level_tools_section() -> None:
     assert "# tools" in catalog
     assert "from tools import echo" in catalog
     assert "def echo(*, message: str) -> Any:" in catalog
-
-
-def test_render_overflow_catalog_returns_navigation_prose() -> None:
-    overflow = render_overflow_catalog()
-    assert "A `tools` package is available" in overflow
-    assert "pathlib.Path('/tools').iterdir()" in overflow
-    assert "/tools/tools" not in overflow
-    assert ".py` file (a top-level tool" in overflow
-    assert "subdirectory (a namespace" in overflow
-    # Overflow path drops every section — no headers, no signatures.
-    assert "# tools" not in overflow
-    assert "def " not in overflow
 
 
 def test_render_catalog_groups_tools_by_namespace_and_sorts() -> None:

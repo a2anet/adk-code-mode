@@ -18,7 +18,7 @@ from adk_code_mode import (
     TOOL_RESULT_NAME_KEY,
     ToolResultArtifactTool,
 )
-from adk_code_mode.executor import CodeModeCodeExecutor
+from adk_code_mode.tool import ExecuteCodeTool
 from adk_code_mode.tools import normaliser
 from tests._fake_runtime import FakeRuntime
 
@@ -120,6 +120,11 @@ async def test_large_result_elided_with_reload_tip() -> None:
     )
     assert set(result) == {"tool_result_artifact", "note"}
     assert result["tool_result_artifact"] == ctx.saved[0]["filename"]
+    assert result["note"] == (
+        "The tool result (112 bytes) was saved as an artifact "
+        "'search_call-1.json' instead of being returned inline. Reload it with "
+        "load_artifact(filename='search_call-1.json')."
+    )
     assert json.loads(ctx.saved[0]["artifact"].inline_data.data) == big  # full payload persisted
 
 
@@ -137,30 +142,28 @@ def _resolved(tool: BaseTool) -> normaliser.ResolvedTool:
     return normaliser.ResolvedTool(tool=tool, toolset=None)
 
 
-def test_executor_wraps_non_artifact_tools_by_default() -> None:
-    executor = CodeModeCodeExecutor(tools=[_ResultTool({}, name="search")], backend=FakeRuntime())
-    wrapped = executor.apply_tool_result_wrapping([_resolved(_ResultTool({}, name="search"))])
+def test_tool_wraps_non_artifact_tools_by_default() -> None:
+    tool = ExecuteCodeTool(tools=[_ResultTool({}, name="search")], backend=FakeRuntime())
+    wrapped = tool._apply_tool_result_wrapping([_resolved(_ResultTool({}, name="search"))])
     assert isinstance(wrapped[0].tool, ToolResultArtifactTool)
 
 
-def test_executor_skips_artifact_tools_and_avoids_double_wrap() -> None:
-    executor = CodeModeCodeExecutor(tools=[], backend=FakeRuntime())
-    resolved = [_resolved(t) for t in executor.tools if isinstance(t, BaseTool)]
+def test_tool_skips_artifact_tools_and_avoids_double_wrap() -> None:
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime())
+    resolved = [_resolved(t) for t in tool._tools if isinstance(t, BaseTool)]
     assert resolved  # the built-in artifact tools were injected
-    wrapped = executor.apply_tool_result_wrapping(resolved)
+    wrapped = tool._apply_tool_result_wrapping(resolved)
     assert all(not isinstance(rt.tool, ToolResultArtifactTool) for rt in wrapped)
 
-    once = executor.apply_tool_result_wrapping([_resolved(_ResultTool({}, name="x"))])
-    twice = executor.apply_tool_result_wrapping(once)
+    once = tool._apply_tool_result_wrapping([_resolved(_ResultTool({}, name="x"))])
+    twice = tool._apply_tool_result_wrapping(once)
     assert sum(isinstance(rt.tool, ToolResultArtifactTool) for rt in twice) == 1
 
 
-def test_executor_flag_off_is_noop() -> None:
-    executor = CodeModeCodeExecutor(
-        tools=[], backend=FakeRuntime(), save_tool_results_as_artifacts=False
-    )
+def test_tool_flag_off_is_noop() -> None:
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), save_tool_results_as_artifacts=False)
     resolved = [_resolved(_ResultTool({}, name="search"))]
-    assert executor.apply_tool_result_wrapping(resolved) is resolved
+    assert tool._apply_tool_result_wrapping(resolved) is resolved
 
 
 def test_catalog_reflects_injected_naming_params() -> None:
@@ -168,9 +171,9 @@ def test_catalog_reflects_injected_naming_params() -> None:
     from adk_code_mode.tools import namespacing
     from adk_code_mode.tools.catalog import render_catalog
 
-    executor = CodeModeCodeExecutor(tools=[_ResultTool({}, name="search")], backend=FakeRuntime())
+    tool = ExecuteCodeTool(tools=[_ResultTool({}, name="search")], backend=FakeRuntime())
     ns_tools = namespacing.build(
-        executor.apply_tool_result_wrapping([_resolved(_ResultTool({}, name="search"))])
+        tool._apply_tool_result_wrapping([_resolved(_ResultTool({}, name="search"))])
     )
     catalog = render_catalog(ns_tools)
     assert "artifact_name" in catalog

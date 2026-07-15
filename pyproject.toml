@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "adk-code-mode"
 dynamic = ["version"]
-description = "A \"Code Mode\" Code Executor for ADK for agents to interact with tools, files, and custom packages with Python"
+description = "A \"Code Mode\" sandboxed code-execution tool for ADK agents to interact with tools, files, and custom packages with Python"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-keywords = ["adk", "code-mode", "code-executor", "agents", "a2a"]
+keywords = ["adk", "code-mode", "execute-code", "agents", "a2a"]
 authors = [
   { name = "A2A Net", email = "hello@a2anet.com" },
 ]

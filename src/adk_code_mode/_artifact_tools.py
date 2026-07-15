@@ -4,7 +4,7 @@
 """Built-in ``save_artifact`` / ``load_artifact`` / ``list_artifacts`` tools.
 
 These are regular ``FunctionTool`` instances injected at the front of
-``CodeModeCodeExecutor.tools`` (set ``include_artifact_tools=False`` to opt out).
+``ExecuteCodeTool``'s configured tools (set ``include_artifact_tools=False`` to opt out).
 They appear in the rendered catalog as top-level tools; the model writes
 ``from tools import save_artifact, load_artifact, list_artifacts``.
 

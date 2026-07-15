@@ -51,6 +51,8 @@ async def test_over_limit_truncates_and_spills() -> None:
     )
     assert len(r.text) < len(text) + 300
     assert "Output exceeded" in r.text
+    assert "Full stdout was saved as an artifact: 'code_mode/stdout/e1.txt'." in r.text
+    assert "load_artifact(filename='code_mode/stdout/e1.txt')" in r.text
     assert "[truncated]" in r.text
     assert r.artifact_filename == "code_mode/stdout/e1.txt"
     keys = await ctx.artifact_service.list_artifact_keys(app_name="a", user_id="u", session_id="s")

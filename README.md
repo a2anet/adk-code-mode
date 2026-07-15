@@ -2,12 +2,12 @@
 
 A [Code Mode](https://blog.cloudflare.com/code-mode/) sandboxed code-execution tool for [Agent Development Kit (ADK)](https://github.com/google/adk-python).
 
-`ExecuteCodeTool` is a regular ADK `BaseTool` — add it to `tools=[...]` like any other tool — that lets the model write Python to call tools and read and write files.
+`ExecuteCodeTool` lets ADK agents write Python code to call tools and read and write files.
 Code runs inside a sandboxed container, and tools (and their credentials) are executed on the host.
 The base image comes with the stdlib and can be extended with any Python package you want.
-The sandboxed container can list, load, and save ADK Artifacts, and any files it creates are returned as artifacts too.
+The sandboxed container can list, load, and save ADK Artifacts, and files it creates are returned as artifacts.
 
-Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and Anthropic's [Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) — both of which keep code execution as one native structured tool call, never disabling function-calling. `ExecuteCodeTool` follows the same shape: the model calls it exactly like any other tool, with normal `tool_use`/`function_call` turn-taking, instead of writing a fenced code block in plain text for ADK to regex out.
+Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and Anthropic's [Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp).
 
 ## ✨ Features
 
@@ -29,7 +29,6 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 | Storage                             | no      | yes (via variables)               | yes (via variables)               | no        | no  | yes (via ADK Artifacts)  |
 | Local development version available | no      | no                                | no                                | yes       | yes | yes                      |
 | Bounded stdout/stderr               | no      | no                                | no                                | no        | no  | yes (`max_output_chars`) |
-| Native structured tool-calling      | yes     | no                                | no                                | yes       | yes | yes                      |
 
 ## 📦 Install
 
@@ -53,7 +52,7 @@ Requires Python 3.10+. Local development requires [Docker](https://docs.docker.c
 
 ## 🚀 Usage
 
-Build an `ExecuteCodeTool` and add it to the agent's `tools=[...]` like any other tool. Wire `release_invocation` into `after_agent_callback` to release the turn's sandbox container as soon as the turn ends — an idle reaper (`session_idle_timeout_seconds`, default `600`) is a backstop, so containers are still reclaimed without it, just later.
+Build an `ExecuteCodeTool`, give it the tools the sandboxed code may call, and attach it to your agent. Wire `release_invocation` into `after_agent_callback` to release the turn's sandbox container when the turn ends. An idle reaper (`session_idle_timeout_seconds`, default `600`) is a backstop.
 
 ### Production (remote sandbox)
 
@@ -80,8 +79,6 @@ root_agent = LlmAgent(
     after_agent_callback=[_release_sandbox],
 )
 ```
-
-That's it — no `code_executor=`, no `before_model_callback=`, no `generate_content_config` to disable native function-calling. `execute_code` is a normal structured tool call the model can interleave with any other tool, and calls it again in a follow-up turn to keep iterating.
 
 ### Local development only
 
@@ -262,8 +259,8 @@ All settings are `ExecuteCodeTool` constructor arguments:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
-| `append_function_stubs_to_system_instruction` | `True` | Appends a `<code-mode>` block listing every available function's signature and docstring to the system instruction on every model turn. If the rendered block would exceed `max_catalog_chars`, **nothing** is appended for that turn — no block, no fallback message either. The model can always fall back to discovering functions by listing `/tools/` and reading a stub's docstring from within the code it runs. |
-| `max_catalog_chars` | `50_000` | Only consulted when `append_function_stubs_to_system_instruction` is true; see above. |
+| `append_function_stubs_to_system_instruction` | `True` | Appends a `<code-mode>` block listing available function signatures and docstrings to the system instruction on every model turn. If the rendered catalog would exceed `max_catalog_chars`, the model can still discover functions by listing `/tools/` and reading the generated stubs. |
+| `max_catalog_chars` | `50_000` | Maximum size of the appended function catalog. |
 | `max_output_chars` | `50_000` | Caps stdout/stderr handed back to the model. Overflow is saved as a session artifact at `code_mode/stdout/<call-id>.txt` and the model sees a head-and-tail view pointing to it. |
 | `max_code_chars` | `1_000_000` | Rejects oversized code payloads before starting a container. |
 | `timeout_seconds` | `None` | Caps overall execution time of one `execute_code` call. Defaults to the platform request timeout (e.g. Cloud Run `--timeout`); set explicitly for defense in depth. |
@@ -297,15 +294,13 @@ The only things crossing the boundary are: code, tool call arguments, tool retur
 
 ### What the model sees
 
-`execute_code` is declared like any other tool — a `FunctionDeclaration` with a single `code: string` parameter and a short, fixed description of what it does. With `append_function_stubs_to_system_instruction` enabled (the default), the system instruction also gets a `<code-mode>` block appended on every turn:
+`execute_code` has a single `code: string` parameter. With `append_function_stubs_to_system_instruction` enabled, the system instruction also gets a `<code-mode>` reference catalog on every turn:
 
 ~~~
 …your instruction…
 
-Reference catalog of the functions available inside execute_code's sandbox.
-These are not separate callable tools — they are Python functions to import
-and call from within the code you pass to execute_code (e.g.
-`from tools.slack import send_message`).
+Reference catalog of the Python functions available inside the execute_code sandbox.
+Import these functions from the `tools` package in the code you pass to execute_code.
 
 <code-mode>
 
@@ -374,18 +369,6 @@ Named "Unsafe" intentionally: it binds a TCP listener on `0.0.0.0`, communicates
 - **No credential-requesting tools.** Tools that need ADK to request credentials, confirmations, UI widgets, agent transfer, escalation, or that yield without an immediate response are rejected with a structured error.
 - **State is turn-scoped.** Variables and the working directory persist across `execute_code` calls **within** a turn, but reset between turns. Use `save_artifact` / `load_artifact` to persist across turns.
 - **No runtime package installation.** The sandbox ships with the Python Standard Library and the runtime's own dependencies only. Extra packages must be baked into the image at build time.
-
-## ⬆️ Migrating from `CodeModeCodeExecutor`
-
-`CodeModeCodeExecutor` (a `BaseCodeExecutor`), `code_mode_before_model_callback`, and `CODE_MODE_SYSTEM_INSTRUCTION` are gone, replaced by a single `ExecuteCodeTool` (a `BaseTool`):
-
-- Drop `code_executor=`, `before_model_callback=code_mode_before_model_callback(executor)`, and the `generate_content_config=` block that disabled native function-calling — none of that is needed anymore.
-- Drop `CODE_MODE_SYSTEM_INSTRUCTION` from your agent's `instruction=`.
-- Add the tool to `tools=[...]` instead: `ExecuteCodeTool(tools=[...], backend=...)`.
-- `release_invocation` is now `async` — `await tool.release_invocation(callback_context.invocation_id)` in `after_agent_callback`.
-- The model now calls `execute_code(code=...)` as a normal structured tool call instead of writing a fenced ` ```python ` block in plain text — this is the actual fix: it removes the `MALFORMED_FUNCTION_CALL` failure mode some Gemini model versions hit when function-calling is disabled, and gives the model a clean `tool_use`-style stop signal each call.
-- The tool catalog now defaults to being injected upfront (`append_function_stubs_to_system_instruction=True`); pass `False` for the old progressive-disclosure-only behavior.
-- A code block's changed output files are now returned as a list of artifact filenames (reloadable via `load_artifact`) instead of raw bytes on `CodeExecutionResult.output_files`.
 
 ## 🛠️ Development
 

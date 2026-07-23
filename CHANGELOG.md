@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.1.0...adk-code-mode-v1.2.0) (2026-07-23)
+
+
+### Features
+
+* add `custom_metadata` to the `save_artifact` tool ([dfd9a59](https://github.com/a2anet/adk-code-mode/commit/dfd9a59bf1718084a1d5c02cc1ea453269223f16))
+
 ## [1.1.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.0.0...adk-code-mode-v1.1.0) (2026-07-15)
 
 

@@ -23,8 +23,10 @@ its stdout/stderr captured and shipped back in a per-block ``OutputFrame``; any
 
 from __future__ import annotations
 
+import importlib.metadata
 import io
 import os
+import platform
 import socket
 import sys
 import traceback
@@ -40,6 +42,11 @@ from adk_code_mode_sandbox.protocol import (
     ShutdownFrame,
 )
 
+# Distributions that ship with the sandbox itself rather than being installed by
+# whoever built the image. Reporting them would tell the model it has tools it
+# was never meant to use (`websockets` is this wheel's only dependency).
+_PACKAGE_DENYLIST = frozenset({"adk-code-mode-sandbox", "websockets", "pip", "setuptools", "wheel"})
+
 CONTROL_FD_ENV = "ADK_CODE_MODE_CONTROL_FD"
 CONTROL_SOCKET_ENV = "ADK_CODE_MODE_CONTROL_SOCKET"
 CONTROL_TCP_ENV = "ADK_CODE_MODE_CONTROL_TCP"
@@ -48,6 +55,35 @@ TOOLS_DIR_ENV = "ADK_CODE_MODE_TOOLS_DIR"
 WORKDIR_ENV = "ADK_CODE_MODE_WORKDIR"
 TOOLS_DIR = os.environ.get(TOOLS_DIR_ENV, "/tools")
 WORKDIR = os.environ.get(WORKDIR_ENV, "/workspace")
+
+
+def ready_frame() -> ReadyFrame:
+    """Build the ``ReadyFrame`` announcing this image's Python and packages.
+
+    Both transports send this, so image introspection stays in one place.
+    """
+    distributions = {
+        dist.name.casefold(): (dist.name, dist.version)
+        for dist in sorted(
+            importlib.metadata.distributions(),
+            key=lambda dist: (dist.name.casefold(), dist.name, dist.version),
+        )
+        if dist.name.casefold() not in _PACKAGE_DENYLIST
+    }
+    packages: dict[str, dict[str, str]] = {}
+    package_distributions = importlib.metadata.packages_distributions()
+    for import_name in sorted(package_distributions, key=lambda name: (name.casefold(), name)):
+        providers: dict[str, str] = {}
+        for distribution_name in sorted(
+            package_distributions[import_name],
+            key=lambda name: (name.casefold(), name),
+        ):
+            distribution = distributions.get(distribution_name.casefold())
+            if distribution is not None:
+                providers[distribution[0]] = distribution[1]
+        if providers:
+            packages[import_name] = providers
+    return ReadyFrame(python_version=platform.python_version(), packages=packages)
 
 
 def _open_control_streams() -> tuple[Any, Any]:
@@ -204,7 +240,7 @@ def main() -> int:
     # One persistent globals dict + one /workspace for the whole connection, so
     # variables and files carry across the turn's successive code blocks.
     globs = _make_globals()
-    client.send(ReadyFrame())
+    client.send(ready_frame())
 
     while True:
         frame = client.recv()

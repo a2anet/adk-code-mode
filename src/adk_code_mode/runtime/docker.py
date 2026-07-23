@@ -88,6 +88,11 @@ class UnsafeLocalDockerBackend:
     extra_env: Mapping[str, str] = field(default_factory=dict)
     run_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
+    @property
+    def identity(self) -> str:
+        """Cache key for what this backend's sandbox image contains."""
+        return self.image
+
     async def start(
         self,
         *,

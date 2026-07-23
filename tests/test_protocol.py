@@ -24,7 +24,12 @@ def _roundtrip(frame: object) -> object:
 
 
 def test_ready_roundtrip() -> None:
-    assert _roundtrip(ReadyFrame()) == ReadyFrame()
+    frame = ReadyFrame(
+        python_version="3.13.2",
+        packages={"yaml": {"PyYAML": "6.0.2"}},
+    )
+
+    assert _roundtrip(frame) == frame
 
 
 def test_run_roundtrip() -> None:

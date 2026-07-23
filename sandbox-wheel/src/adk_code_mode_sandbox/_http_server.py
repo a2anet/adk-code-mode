@@ -49,6 +49,7 @@ from adk_code_mode_sandbox._entry import (
     _prepare_sys_path,
     _prepare_workdir,
     _sanitize_environ,
+    ready_frame,
     run_block,
 )
 from adk_code_mode_sandbox._rpc_client import RpcClient
@@ -57,7 +58,6 @@ from adk_code_mode_sandbox.protocol import (
     DoneFrame,
     OutputFrame,
     ProtocolError,
-    ReadyFrame,
     RunFrame,
     ShutdownFrame,
     decode,
@@ -188,8 +188,9 @@ async def _handle_connection(ws: Any) -> None:
         globs = _make_globals()
         loop = asyncio.get_running_loop()
 
-        # 4. Announce readiness once (carries the protocol version).
-        await ws.send(encode(ReadyFrame()).decode("utf-8"))
+        # 4. Announce readiness once (carries the protocol version, Python
+        #    version, and installed packages).
+        await ws.send(encode(ready_frame()).decode("utf-8"))
 
         # 5. Run code blocks until the client ends the turn or disconnects.
         while await _run_one_block(ws, loop, globs, workspace_dir, max_workspace):

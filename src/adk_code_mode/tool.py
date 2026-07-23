@@ -42,6 +42,7 @@ from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
+from adk_code_mode import metadata
 from adk_code_mode._artifact_tools import ARTIFACT_TOOLS
 from adk_code_mode.output import truncate
 from adk_code_mode.runtime.base import (
@@ -63,7 +64,6 @@ from adk_code_mode.runtime.protocol import (
 )
 from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.tools import namespacing, normaliser, stubs
-from adk_code_mode.tools.catalog import render_catalog
 from adk_code_mode.tools.dispatcher import Dispatcher
 from adk_code_mode.workspace.files import hash_file, walk_workspace
 
@@ -113,29 +113,32 @@ _ARTIFACT_TOOL_NAMES = frozenset(tool.name for tool in ARTIFACT_TOOLS)
 _LIVE_TURN_SESSIONS: "set[_TurnSession]" = set()
 _LIVE_TURN_SESSIONS_LOCK = threading.Lock()
 
-_TOOLS_OPEN = "<code-mode>"
-_TOOLS_CLOSE = "</code-mode>"
-
-_STATIC_DESCRIPTION = (
-    "Execute Python code in a sandboxed container. The Python Standard "
-    "Library and a set of custom tools are available as an importable "
-    "`tools` package (e.g. `from tools.slack import send_message`) — list "
-    "`/tools/` and read a file's docstring to see what's available, or "
-    "check the system instruction for a full reference catalog if one was "
-    "provided. Print anything you want to see; only stdout/stderr are "
-    "returned. Variables and the working directory persist across calls "
-    "within the same turn and reset on the next turn — use `save_artifact` "
-    "/ `load_artifact` (imported the same way) to persist across turns. "
-    "Files created or changed by the code are saved as artifacts "
-    "automatically and returned by name."
+_DESCRIPTION_PREFIX = (
+    "Execute Python code in a sandboxed container. Custom tools are Python "
+    "functions to import from the `tools` package (e.g. `from tools.slack "
+    "import send_message`). "
 )
 
-_FUNCTION_STUBS_PREAMBLE = (
-    "Reference catalog of the functions available inside execute_code's "
-    "sandbox. These are not separate callable tools — they are Python "
-    "functions to import and call from within the code you pass to "
-    "execute_code (e.g. `from tools.slack import send_message`)."
+# Swapped at construction: pointing the model at a `<code-mode>` section that
+# was never appended would send it looking for something that isn't there.
+_DESCRIPTION_WITH_METADATA = (
+    "See the `<code-mode>` section of the system instruction for the Python "
+    "version, preinstalled packages, and available functions."
 )
+
+_DESCRIPTION_SUFFIX = (
+    " Print anything you want to see; only stdout/stderr are returned. "
+    "Variables and the working directory persist across calls within the same "
+    "turn and reset on the next turn — use `save_artifact` / `load_artifact` "
+    "(imported the same way) to persist across turns. Files created or changed "
+    "by the code are saved as artifacts automatically"
+)
+
+
+def _build_description(*, append_metadata: bool) -> str:
+    """Build the tool description for this tool's configured surface."""
+    pointer = _DESCRIPTION_WITH_METADATA if append_metadata else metadata.DISCOVER_TOOLS
+    return f"{_DESCRIPTION_PREFIX}{pointer}{_DESCRIPTION_SUFFIX}"
 
 
 ArtifactsSavedCallback = Callable[[InvocationContext, dict[str, int]], Awaitable[None]]
@@ -195,8 +198,8 @@ class ExecuteCodeTool(BaseTool):
         backend: SandboxBackend,
         include_artifact_tools: bool = True,
         save_tool_results_as_artifacts: bool = True,
-        append_function_stubs_to_system_instruction: bool = True,
-        max_catalog_chars: int = 50_000,
+        append_code_mode_metadata_to_system_instruction: bool = True,
+        max_code_mode_metadata_chars: int = 50_000,
         max_output_chars: int = 50_000,
         max_code_chars: int = 1_000_000,
         timeout_seconds: int | None = None,
@@ -218,15 +221,20 @@ class ExecuteCodeTool(BaseTool):
             tool is wrapped so its result is also saved as a session artifact;
             large results are elided from the reply and reloadable via
             ``load_artifact``. Set ``False`` to return tool results inline.
-          append_function_stubs_to_system_instruction: If true (default), every
-            model turn's system instruction gets a ``<code-mode>`` block
-            listing every available function's signature and docstring. If the
-            rendered block would exceed ``max_catalog_chars``, nothing is
-            appended at all for that turn — the model can still discover
-            functions by listing ``/tools/`` and reading a stub's docstring
-            from within the code it runs.
-          max_catalog_chars: Only consulted when
-            ``append_function_stubs_to_system_instruction`` is true; see above.
+          append_code_mode_metadata_to_system_instruction: If true (default),
+            every model turn's system instruction gets a ``<code-mode>`` block
+            describing the sandbox: its Python version, its preinstalled
+            packages, and every available function's signature and docstring.
+            Set ``False`` for a bare system instruction — the tool description
+            then tells the model to discover functions by listing ``/tools/``
+            from within the code it runs, and the Python version and package
+            list are not surfaced at all.
+          max_code_mode_metadata_chars: Budget for the whole rendered
+            ``<code-mode>`` block, tags included. An oversized block first
+            drops signatures and docstrings (keeping the import lines), then
+            replaces the catalog with a pointer to ``/tools/``. The Python
+            version and package list are always kept. Only consulted when
+            ``append_code_mode_metadata_to_system_instruction`` is true.
           max_output_chars: Caps stdout/stderr handed back to the model.
             Overflow is saved as a session artifact and the model sees a
             head-and-tail view pointing to it.
@@ -245,7 +253,12 @@ class ExecuteCodeTool(BaseTool):
             ``InvocationContext`` and a ``{filename: version}`` dict. Hook
             errors are logged and swallowed — they must not break execution.
         """
-        super().__init__(name="execute_code", description=_STATIC_DESCRIPTION)
+        super().__init__(
+            name="execute_code",
+            description=_build_description(
+                append_metadata=append_code_mode_metadata_to_system_instruction
+            ),
+        )
 
         adapted: list[BaseTool | BaseToolset] = []
         if include_artifact_tools:
@@ -264,10 +277,11 @@ class ExecuteCodeTool(BaseTool):
         self._tools = adapted
         self._backend = backend
         self._save_tool_results_as_artifacts = save_tool_results_as_artifacts
-        self._append_function_stubs_to_system_instruction = (
-            append_function_stubs_to_system_instruction
+        self._append_code_mode_metadata_to_system_instruction = (
+            append_code_mode_metadata_to_system_instruction
         )
-        self._max_catalog_chars = max_catalog_chars
+        self._max_code_mode_metadata_chars = max_code_mode_metadata_chars
+        self._backend_identity = metadata.backend_identity(backend)
         self._max_output_chars = max_output_chars
         self._max_code_chars = max_code_chars
         self.timeout_seconds = timeout_seconds
@@ -328,14 +342,17 @@ class ExecuteCodeTool(BaseTool):
         self, *, tool_context: ToolContext, llm_request: "LlmRequest"
     ) -> None:
         await super().process_llm_request(tool_context=tool_context, llm_request=llm_request)
-        if not self._append_function_stubs_to_system_instruction:
+        if not self._append_code_mode_metadata_to_system_instruction:
             return
         ns_tools = await self._get_or_resolve_tools(tool_context)
-        catalog = render_catalog(ns_tools)
-        if len(catalog) > self._max_catalog_chars:
-            return
         llm_request.append_instructions(
-            [_FUNCTION_STUBS_PREAMBLE, f"{_TOOLS_OPEN}\n{catalog}\n{_TOOLS_CLOSE}"]
+            [
+                metadata.render(
+                    identity=self._backend_identity,
+                    namespaced=ns_tools,
+                    max_chars=self._max_code_mode_metadata_chars,
+                )
+            ]
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
@@ -509,7 +526,12 @@ class ExecuteCodeTool(BaseTool):
             per_tool_timeout_seconds=self._per_tool_timeout_seconds,
         )
         result = await asyncio.wait_for(
-            _run_block(session=turn.session, dispatcher=dispatcher, code=code),
+            _run_block(
+                session=turn.session,
+                dispatcher=dispatcher,
+                code=code,
+                backend_identity=self._backend_identity,
+            ),
             timeout=self.timeout_seconds if self.timeout_seconds else None,
         )
         return result, dispatcher
@@ -769,6 +791,7 @@ async def _run_block(
     session: SandboxSession,
     dispatcher: Dispatcher,
     code: str,
+    backend_identity: str,
 ) -> SandboxResult:
     """Run one code block on an already-open session (no connect, no shutdown).
 
@@ -786,7 +809,9 @@ async def _run_block(
     done_exit_code: int | None = None
     try:
         await session.begin_block([])
-        host_loop = asyncio.create_task(_host_loop(session=session, dispatcher=dispatcher))
+        host_loop = asyncio.create_task(
+            _host_loop(session=session, dispatcher=dispatcher, backend_identity=backend_identity)
+        )
         try:
             await session.send(RunFrame(code=code))
             code_sent = True
@@ -817,11 +842,14 @@ async def _host_loop(
     *,
     session: SandboxSession,
     dispatcher: Dispatcher,
+    backend_identity: str,
 ) -> int | None:
     """Consume frames from the sandbox until a ``DoneFrame`` arrives.
 
     ``tool_call`` frames are dispatched concurrently as background tasks so a
-    slow tool doesn't block other calls.
+    slow tool doesn't block other calls. The opening ``ReadyFrame`` is also
+    where the sandbox reports what it has installed, cached for the next
+    system instruction.
     """
     pending: list[asyncio.Task[Any]] = []
     frames = session.frames()
@@ -833,6 +861,7 @@ async def _host_loop(
                         f"sandbox uses protocol v{frame.protocol_version}, "
                         f"host uses v{PROTOCOL_VERSION}; rebuild the sandbox image"
                     )
+                metadata.record(backend_identity, frame)
                 continue
             if isinstance(frame, DoneFrame):
                 return frame.exit_code

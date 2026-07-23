@@ -12,7 +12,7 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 ## ✨ Features
 
 - **Call ADK tools from sandbox code** — imports against the `tools` package proxy back to the host and run through ADK's `before_tool` / `after_tool` / `on_error` callbacks and the plugin manager exactly as direct tool calls would.
-- **Bake any Python package into the image** — extend the published base image with anything the model's code needs to `import`, no runtime `pip install` required.
+- **Bake any Python package into the image** — extend the published base image with anything the model's code needs to `import`, no runtime `pip install` required. The sandbox reports what it has installed, so the model is told about it automatically.
 - **Cross-turn persistence via ADK Artifacts** — `save_artifact` / `load_artifact` / `list_artifacts` are auto-injected and route through your configured `ArtifactService`. Files the code creates or changes are saved as artifacts automatically too.
 - **Tool results saved as artifacts** — on by default; every tool's result is persisted as a `code_mode.tool_result` artifact (with optional model-supplied name/description) so hosts can forward outputs and large results stay out of the prompt. Opt out with `save_tool_results_as_artifacts=False`.
 - **Bounded stdout/stderr** — overflow lands in a session artifact instead of poisoning the prompt.
@@ -253,14 +253,16 @@ RUN pip install --no-cache-dir pandas==2.2.*
 
 The same image works for both `RemoteBackend` and `UnsafeLocalDockerBackend`. To build directly from this repo, run `make docker-image`.
 
+Whatever you install is advertised to the model automatically — no host-side configuration. The sandbox reports its Python version and maps each top-level import name to the installed distribution and version that provides it; they appear in the `<code-mode>` block as `<python-version>` and `<installed-packages>`. Because the report only arrives once a container has booted, the first model call of a host process doesn't carry them yet; from then on the values are cached per sandbox image for the life of the process.
+
 ## ⚙️ Configuration
 
 All settings are `ExecuteCodeTool` constructor arguments:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
-| `append_function_stubs_to_system_instruction` | `True` | Appends a `<code-mode>` block listing available function signatures and docstrings to the system instruction on every model turn. If the rendered catalog would exceed `max_catalog_chars`, the model can still discover functions by listing `/tools/` and reading the generated stubs. |
-| `max_catalog_chars` | `50_000` | Maximum size of the appended function catalog. |
+| `append_code_mode_metadata_to_system_instruction` | `True` | Appends the `<code-mode>` block — Python version, installed packages, and the function catalog — to the system instruction on every model turn. Set `False` for a bare system instruction; the tool description then points the model at `/tools/` instead, and the Python version and package list are not surfaced at all. |
+| `max_code_mode_metadata_chars` | `50_000` | Budget for the whole rendered `<code-mode>` block, tags included. Oversized blocks degrade in tiers rather than disappearing — see [What the model sees](#what-the-model-sees). |
 | `max_output_chars` | `50_000` | Caps stdout/stderr handed back to the model. Overflow is saved as a session artifact at `code_mode/stdout/<call-id>.txt` and the model sees a head-and-tail view pointing to it. |
 | `max_code_chars` | `1_000_000` | Rejects oversized code payloads before starting a container. |
 | `timeout_seconds` | `None` | Caps overall execution time of one `execute_code` call. Defaults to the platform request timeout (e.g. Cloud Run `--timeout`); set explicitly for defense in depth. |
@@ -281,7 +283,7 @@ A sandbox container is held open for one **turn** (one ADK invocation) and reuse
 
 ## 🏗️ Architecture
 
-**Host wheel (`adk-code-mode`).** Lives in the same process as your `LlmAgent`. `ExecuteCodeTool.process_llm_request` resolves tools and, when `append_function_stubs_to_system_instruction` is enabled, renders the catalog and appends it to the system instruction. At execution time (`run_async`), it generates a `tools/` Python package of thin stubs, stages the working directory, and opens (or reuses) the turn's sandbox connection — the container spans the whole turn.
+**Host wheel (`adk-code-mode`).** Lives in the same process as your `LlmAgent`. `ExecuteCodeTool.process_llm_request` resolves tools and, when `append_code_mode_metadata_to_system_instruction` is enabled, renders the `<code-mode>` block and appends it to the system instruction. At execution time (`run_async`), it generates a `tools/` Python package of thin stubs, stages the working directory, and opens (or reuses) the turn's sandbox connection — the container spans the whole turn.
 
 **Sandbox wheel (`adk-code-mode-sandbox`).** Pre-installed in the container image. When model code calls a stub, it sends a JSON-Lines frame over the control connection; the host runs the real tool (with callbacks and plugins) and sends the result back.
 
@@ -294,16 +296,36 @@ The only things crossing the boundary are: code, tool call arguments, tool retur
 
 ### What the model sees
 
-`execute_code` has a single `code: string` parameter. With `append_function_stubs_to_system_instruction` enabled, the system instruction also gets a `<code-mode>` reference catalog on every turn:
+Two surfaces, deliberately kept apart. The **tool description** is the invariant contract of calling `execute_code` — the same for every deployment, and the model's only map when the `<code-mode>` block is disabled. `execute_code` has a single `code: string` parameter and this description:
+
+~~~
+Execute Python code in a sandboxed container. Custom tools are Python functions to
+import from the `tools` package (e.g. `from tools.slack import send_message`). See
+the `<code-mode>` section of the system instruction for the Python version,
+preinstalled packages, and available functions. Print anything you want to see; only
+stdout/stderr are returned. Variables and the working directory persist across calls
+within the same turn and reset on the next turn — use `save_artifact` /
+`load_artifact` (imported the same way) to persist across turns. Files created or
+changed by the code are saved as artifacts automatically
+~~~
+
+With `append_code_mode_metadata_to_system_instruction` disabled that middle sentence is replaced by `List /tools/ and read a file's docstring to see what's available.`, so the description never points at a section that wasn't appended.
+
+The **`<code-mode>` block** is the per-deployment inventory of the sandbox, appended to the system instruction on every model turn:
 
 ~~~
 …your instruction…
 
-Reference catalog of the Python functions available inside the execute_code sandbox.
-Import these functions from the `tools` package in the code you pass to execute_code.
-
 <code-mode>
-
+  <how-to-use>
+This section describes the sandbox that `execute_code` runs in: the Python version available, the third-party packages preinstalled in it, and the functions you can import from the `tools` package.
+  </how-to-use>
+  <python-version>3.13.2</python-version>
+  <installed-packages>
+pandas: pandas 2.3.3
+yaml: PyYAML 6.0.2
+  </installed-packages>
+  <tools-package>
 # tools.slack
 
 from tools.slack import list_channels, send_message
@@ -320,13 +342,38 @@ def send_message(*, channel: str, text: str, thread_ts: str | None = ...) -> Any
 
 from tools import save_artifact, load_artifact, list_artifacts
 …
-
+  </tools-package>
 </code-mode>
 ~~~
 
+Tags are indented; their content is not. The `<tools-package>` body is Python source, where leading whitespace is meaningful. Each installed-package line is `<import name>: <distribution> <version>`; namespace imports supplied by multiple distributions list every provider in deterministic order. Import names and providers are sorted so the block stays byte-stable for prompt caching. `<python-version>` and `<installed-packages>` are omitted entirely — rather than rendered blank — when the sandbox hasn't reported yet or the image has no extra packages, since an empty tag reads as "none exist".
+
 With `save_tool_results_as_artifacts` enabled (the default), each non-artifact tool above — e.g. `list_channels` and `send_message` — also carries two optional `artifact_name: str | None = ...` / `artifact_description: str | None = ...` parameters for naming its saved result.
 
-If the rendered catalog would exceed `max_catalog_chars`, nothing is appended to the system instruction that turn — not even a fallback note. The model can still navigate the sandbox from Python:
+#### Fitting the budget
+
+A block over `max_code_mode_metadata_chars` degrades in tiers instead of vanishing. The Python version and package list survive every tier — they're small, and the model cannot discover them any other way.
+
+1. **Full** — as above.
+2. **Names only** — signatures and docstrings dropped, import lines kept:
+
+   ~~~
+     <tools-package>
+   # tools.slack
+
+   from tools.slack import list_channels, send_message
+     </tools-package>
+   ~~~
+
+3. **Pointer** — the catalog is replaced by a discovery note, and this tier is emitted no matter how small the budget:
+
+   ~~~
+     <tools-package>
+   The full catalog is too large to include here. List `/tools/` and read a file's docstring to see what's available.
+     </tools-package>
+   ~~~
+
+At the last tier the model navigates the sandbox from Python instead:
 
 ```python
 import pathlib

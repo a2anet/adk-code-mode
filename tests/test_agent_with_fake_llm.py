@@ -185,7 +185,7 @@ async def test_agent_runs_code_through_execute_code_tool() -> None:
     }
     assert "execute_code" in declared_names
 
-    # append_function_stubs_to_system_instruction defaults on: the full
+    # append_code_mode_metadata_to_system_instruction defaults on: the full
     # catalog should already be in the first request's system instruction.
     system_instruction = first.config.system_instruction
     assert isinstance(system_instruction, str)
@@ -215,7 +215,7 @@ async def test_agent_catalog_omitted_when_flag_disabled() -> None:
         tools=[_EchoTool()],
         backend=FakeRuntime(),
         max_output_chars=10_000,
-        append_function_stubs_to_system_instruction=False,
+        append_code_mode_metadata_to_system_instruction=False,
     )
     fake_llm = _FakeLlm(
         responses=[

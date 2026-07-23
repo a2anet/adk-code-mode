@@ -77,6 +77,11 @@ class RemoteBackend:
     max_upload_workspace_bytes: int = 100 * 1024 * 1024
     max_download_workspace_bytes: int = 100 * 1024 * 1024
 
+    @property
+    def identity(self) -> str:
+        """Cache key for what this backend's sandbox image contains."""
+        return self.url
+
     async def start(
         self,
         *,

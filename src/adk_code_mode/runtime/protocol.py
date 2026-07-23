@@ -39,10 +39,20 @@ FrameKind = Literal[
 
 @dataclass(frozen=True)
 class ReadyFrame:
-    """Sandbox → host. Sent once after boot."""
+    """Sandbox → host. Sent once after boot.
+
+    ``python_version`` / ``packages`` describe the image the sandbox runs in so
+    the host can tell the model what it can import. ``packages`` maps each
+    top-level import name to the distributions that provide it and their
+    versions. Both are additive fields with defaults, so a host and a sandbox
+    on different releases still speak: ``decode`` drops unknown keys, and an
+    older sandbox that sends neither just leaves them empty.
+    """
 
     kind: Literal["ready"] = "ready"
     protocol_version: int = PROTOCOL_VERSION
+    python_version: str = ""
+    packages: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

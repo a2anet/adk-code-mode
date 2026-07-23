@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from adk_code_mode import metadata
 from adk_code_mode.tool import (
     ProtocolVersionMismatchError,
     _handle_tool_call,
@@ -56,13 +57,32 @@ class _StubHandle:
 
 async def test_host_loop_accepts_matching_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(), DoneFrame()])
-    await _host_loop(session=handle, dispatcher=None)  # type: ignore[arg-type]
+    await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
 
 
 async def test_host_loop_rejects_mismatched_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(protocol_version=PROTOCOL_VERSION + 1), DoneFrame()])
     with pytest.raises(ProtocolVersionMismatchError):
-        await _host_loop(session=handle, dispatcher=None)  # type: ignore[arg-type]
+        await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
+
+
+async def test_host_loop_records_sandbox_environment_from_ready_frame() -> None:
+    metadata.reset()
+    handle = _StubHandle(
+        [
+            ReadyFrame(
+                python_version="3.13.2",
+                packages={"pandas": {"pandas": "2.3.3"}},
+            ),
+            DoneFrame(),
+        ]
+    )
+
+    await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
+
+    block = metadata.render(identity="img", namespaced=[], max_chars=10_000)
+    assert "<python-version>3.13.2</python-version>" in block
+    assert "pandas 2.3.3" in block
 
 
 def test_json_safe_handles_common_non_json_leaf_types() -> None:

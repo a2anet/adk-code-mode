@@ -7,7 +7,7 @@ Catalog-injection behavior here supersedes the old
 ``adk_code_mode.callback.code_mode_before_model_callback`` tests — that
 standalone callback no longer exists; its behavior now lives in
 ``ExecuteCodeTool.process_llm_request``, gated by
-``append_function_stubs_to_system_instruction``.
+``append_code_mode_metadata_to_system_instruction``.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ async def test_catalog_appended_when_system_instruction_is_none() -> None:
 
     instruction = request.config.system_instruction
     assert isinstance(instruction, str)
-    assert "Reference catalog of the functions available" in instruction
+    assert "This section describes the sandbox" in instruction
     assert "<code-mode>" in instruction and instruction.rstrip().endswith("</code-mode>")
     assert "def ping" in instruction
 
@@ -124,23 +124,51 @@ async def test_catalog_appended_to_existing_string_system_instruction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nothing_appended_when_catalog_exceeds_max_catalog_chars() -> None:
+async def test_catalog_falls_back_to_names_when_over_budget() -> None:
+    tools = [_SchemaTool(f"tool_{i}", f"Description {i}.") for i in range(20)]
+    full = _make_tool(list(tools))
+    full_request = _llm_request(system_instruction=None)
+    await full.process_llm_request(tool_context=_tool_context(), llm_request=full_request)
+    full_instruction = full_request.config.system_instruction
+    assert isinstance(full_instruction, str)
+
+    # A budget between the two tiers: too small for signatures + docstrings,
+    # comfortably large for the import lines alone.
+    tool = _make_tool(list(tools), max_code_mode_metadata_chars=len(full_instruction) - 1)
+    request = _llm_request(system_instruction=None)
+
+    await tool.process_llm_request(tool_context=_tool_context(), llm_request=request)
+
+    instruction = request.config.system_instruction
+    assert isinstance(instruction, str)
+    assert "from tools import" in instruction
+    assert "def tool_0" not in instruction
+    assert "Description 0." not in instruction
+
+
+@pytest.mark.asyncio
+async def test_catalog_falls_back_to_discovery_pointer_when_far_over_budget() -> None:
     tool = _make_tool(
         [_SchemaTool(f"tool_{i}", f"Description {i}.") for i in range(20)],
-        max_catalog_chars=200,
+        max_code_mode_metadata_chars=200,
     )
     request = _llm_request(system_instruction=None)
 
     await tool.process_llm_request(tool_context=_tool_context(), llm_request=request)
 
-    # No fallback message either — the model relies on progressive discovery
-    # (list /tools/, read a stub's docstring) with nothing added upfront.
-    assert request.config.system_instruction is None
+    # The floor is unconditional: even far over budget the block is emitted, so
+    # the Python version and package list are never lost to a large tool surface.
+    instruction = request.config.system_instruction
+    assert isinstance(instruction, str)
+    assert "List `/tools/`" in instruction
+    assert "<how-to-use>" in instruction
+    assert "def tool_0" not in instruction
+    assert "from tools import" not in instruction
 
 
 @pytest.mark.asyncio
 async def test_catalog_omitted_when_flag_disabled() -> None:
-    tool = _make_tool([_SchemaTool("ping")], append_function_stubs_to_system_instruction=False)
+    tool = _make_tool([_SchemaTool("ping")], append_code_mode_metadata_to_system_instruction=False)
     request = _llm_request(system_instruction=None)
 
     await tool.process_llm_request(tool_context=_tool_context(), llm_request=request)

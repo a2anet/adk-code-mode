@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.2.0...adk-code-mode-v1.3.0) (2026-07-23)
+
+
+### Features
+
+* describe the sandbox to the model in a tagged `<code-mode>` block ([#14](https://github.com/a2anet/adk-code-mode/issues/14)) ([662a281](https://github.com/a2anet/adk-code-mode/commit/662a28138e8632b434e5f1ecd52793f7d83ee097))
+
 ## [1.2.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.1.0...adk-code-mode-v1.2.0) (2026-07-23)
 
 

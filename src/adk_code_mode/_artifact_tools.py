@@ -43,6 +43,7 @@ async def save_artifact(
     filename: str,
     content: str,
     mime_type: str | None = None,
+    custom_metadata: dict[str, Any] | None = None,
     tool_context: ToolContext,
 ) -> int:
     """Save an artifact to the session. Returns the new version number.
@@ -62,6 +63,8 @@ async def save_artifact(
             content=base64.b64encode(image_bytes).decode("ascii"),
             mime_type="image/png",
         )
+
+    ``custom_metadata`` is custom metadata to associate with the artifact.
     """
     if _is_text_mime(mime_type):
         part = genai_types.Part(
@@ -77,7 +80,7 @@ async def save_artifact(
                 mime_type=mime_type or "application/octet-stream",
             )
         )
-    return await tool_context.save_artifact(filename, part)
+    return await tool_context.save_artifact(filename, part, custom_metadata=custom_metadata)
 
 
 async def load_artifact(

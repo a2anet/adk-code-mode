@@ -34,12 +34,17 @@ class _StubToolContext:
     ) -> None:
         self._load_result = load_result
         self._list_result = list_result or []
-        self.saved: list[tuple[str, genai_types.Part]] = []
+        self.saved: list[tuple[str, genai_types.Part, dict[str, Any] | None]] = []
         self.loaded: list[tuple[str, int | None]] = []
         self.listed = 0
 
-    async def save_artifact(self, filename: str, part: genai_types.Part) -> int:
-        self.saved.append((filename, part))
+    async def save_artifact(
+        self,
+        filename: str,
+        part: genai_types.Part,
+        custom_metadata: dict[str, Any] | None = None,
+    ) -> int:
+        self.saved.append((filename, part, custom_metadata))
         return len(self.saved)
 
     async def load_artifact(
@@ -65,7 +70,7 @@ async def test_save_artifact_encodes_text_mime_as_utf8() -> None:
 
     assert version == 1
     assert len(ctx.saved) == 1
-    name, part = ctx.saved[0]
+    name, part, _ = ctx.saved[0]
     assert name == "report.json"
     assert part.inline_data is not None
     assert part.inline_data.mime_type == "application/json"
@@ -82,7 +87,7 @@ async def test_save_artifact_treats_text_plus_subtype_as_text() -> None:
         tool_context=ctx,  # type: ignore[arg-type]
     )
 
-    _, part = ctx.saved[0]
+    _, part, _ = ctx.saved[0]
     assert part.inline_data is not None
     assert part.inline_data.data == b"<svg/>"
 
@@ -98,7 +103,7 @@ async def test_save_artifact_decodes_base64_for_binary_mime() -> None:
         tool_context=ctx,  # type: ignore[arg-type]
     )
 
-    _, part = ctx.saved[0]
+    _, part, _ = ctx.saved[0]
     assert part.inline_data is not None
     assert part.inline_data.data == raw
     assert part.inline_data.mime_type == "application/octet-stream"
@@ -114,10 +119,39 @@ async def test_save_artifact_defaults_mime_when_none() -> None:
         tool_context=ctx,  # type: ignore[arg-type]
     )
 
-    _, part = ctx.saved[0]
+    _, part, _ = ctx.saved[0]
     assert part.inline_data is not None
     assert part.inline_data.mime_type == "application/octet-stream"
     assert part.inline_data.data == raw
+
+
+@pytest.mark.asyncio
+async def test_save_artifact_forwards_custom_metadata() -> None:
+    ctx = _StubToolContext()
+    await save_artifact(
+        filename="report.md",
+        content="# Report",
+        mime_type="text/markdown",
+        custom_metadata={"a2anet_agent_run.send_as_a2a_artifact": "true"},
+        tool_context=ctx,  # type: ignore[arg-type]
+    )
+
+    _, _, custom_metadata = ctx.saved[0]
+    assert custom_metadata == {"a2anet_agent_run.send_as_a2a_artifact": "true"}
+
+
+@pytest.mark.asyncio
+async def test_save_artifact_defaults_custom_metadata_to_none() -> None:
+    ctx = _StubToolContext()
+    await save_artifact(
+        filename="scratch.txt",
+        content="notes",
+        mime_type="text/plain",
+        tool_context=ctx,  # type: ignore[arg-type]
+    )
+
+    _, _, custom_metadata = ctx.saved[0]
+    assert custom_metadata is None
 
 
 @pytest.mark.asyncio
@@ -196,4 +230,4 @@ def test_artifact_tools_declarations_omit_tool_context_param() -> None:
     assert save_decl is not None
     properties: dict[str, Any] = save_decl.parameters.properties or {}  # type: ignore[union-attr]
     assert "tool_context" not in properties
-    assert {"filename", "content"}.issubset(properties.keys())
+    assert {"filename", "content", "custom_metadata"}.issubset(properties.keys())

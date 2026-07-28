@@ -35,6 +35,9 @@ docker = ["docker>=7.0.0"]
 [dependency-groups]
 dev = [
     "adk-code-mode[docker]",
+    # Ships the JSON Schema 2020-12 meta-schemas, which `test_stubs_json_schema`
+    # reads to enumerate the keyword set rather than hard-coding it.
+    "jsonschema-specifications>=2023.0.0",
     "mypy>=1.19.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -67,6 +70,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["websockets", "websockets.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["jsonschema_specifications", "jsonschema_specifications.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

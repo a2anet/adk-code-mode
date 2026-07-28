@@ -44,12 +44,18 @@ _KEY_ALIASES: dict[str, str | None] = {
     "any_of": "anyOf",
     "additional_properties": "additionalProperties",
     "property_ordering": None,
-    "title": None,
 }
 
-# Validation keywords worth showing a caller, in the order they read best. These
-# never reach the signature — no Python type expresses `maxLength` — so the
-# docstring is their only route to the model.
+# Validation and annotation keywords worth showing a caller, in the order they
+# read best. These never reach the signature — no Python type expresses
+# `maxLength` — so the docstring is their only route to the model.
+#
+# Deliberately not surfaced: `not`, `if`/`then`/`else`, `dependentSchemas`,
+# `propertyNames`, `unevaluated*` and `contains` (as a schema). They express
+# conditional structure that reads as noise in a one-line summary, and none of
+# them appear in the OpenAPI documents this renders in practice. `$schema`,
+# `$id`, `$anchor`, `$comment` and `$vocabulary` describe the document rather
+# than the value.
 _CONSTRAINTS = (
     "format",
     "pattern",
@@ -63,10 +69,21 @@ _CONSTRAINTS = (
     "minItems",
     "maxItems",
     "uniqueItems",
+    "minContains",
+    "maxContains",
     "minProperties",
     "maxProperties",
+    "contentEncoding",
+    "contentMediaType",
     "const",
     "example",
+)
+
+# Boolean annotations that change whether a caller should send a value at all.
+_FLAGS = (
+    ("deprecated", "deprecated"),
+    ("readOnly", "read-only"),
+    ("writeOnly", "write-only"),
 )
 
 # Guards against self-referential schemas, which recurse forever otherwise. Not a
@@ -214,7 +231,14 @@ def _schema_to_type(schema: Any) -> str:
         else:
             result = "list[Any]"
     elif ty == "object":
-        result = "dict[str, Any]"
+        # An open map (`additionalProperties` as a schema, no fixed properties)
+        # types precisely; anything with declared keys stays `dict[str, Any]`
+        # and gets its shape from the docstring instead.
+        extra = schema.get("additionalProperties")
+        if isinstance(extra, dict) and not schema.get("properties"):
+            result = f"dict[str, {_schema_to_type(extra)}]"
+        else:
+            result = "dict[str, Any]"
     elif isinstance(ty, str) and ty in _PRIMITIVES:
         result = _PRIMITIVES[ty]
     else:
@@ -254,10 +278,22 @@ def _constraint_suffix(schema: dict[str, Any], *, include_default: bool = False)
     down where the type expression has already collapsed to ``list[int]``.
     """
     parts = [f"{key}={_format_scalar(schema[key])}" for key in _CONSTRAINTS if key in schema]
+    examples = schema.get("examples")
+    if isinstance(examples, list) and examples:
+        parts.append("examples=" + ", ".join(_format_scalar(v) for v in examples[:2]))
     if include_default and "default" in schema:
         parts.append(f"default={_format_scalar(schema['default'])}")
+    parts.extend(label for key, label in _FLAGS if schema.get(key) is True)
     if schema.get("additionalProperties") is False:
         parts.append("no other keys")
+    dependent = schema.get("dependentRequired")
+    if isinstance(dependent, dict):
+        parts.extend(
+            f"{name} requires {', '.join(needed)}" for name, needed in dependent.items() if needed
+        )
+    pattern_properties = schema.get("patternProperties")
+    if isinstance(pattern_properties, dict) and pattern_properties:
+        parts.append("key patterns: " + ", ".join(pattern_properties))
 
     items = schema.get("items")
     if isinstance(items, dict):
@@ -271,6 +307,19 @@ def _constraint_suffix(schema: dict[str, Any], *, include_default: bool = False)
             parts.append("items: " + ", ".join(item_parts))
 
     return f" ({', '.join(parts)})" if parts else ""
+
+
+def _prose(schema: dict[str, Any]) -> str:
+    """The schema's human text: ``description``, else ``title``.
+
+    Plenty of real schemas carry only a ``title``; dropping it would leave the
+    field with a type and nothing else.
+    """
+    for key in ("description", "title"):
+        text = str(schema.get(key, "")).strip()
+        if text:
+            return text
+    return ""
 
 
 def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> list[str]:
@@ -296,7 +345,7 @@ def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> 
         head = f"{indent}{name}: {_schema_to_type(field)}"
         if name in required:
             head += " (required)"
-        description = str(field.get("description", "")).strip().splitlines()
+        description = _prose(field).splitlines()
         if description:
             head += f" - {description[0].strip()}"
         lines.append(head + _constraint_suffix(field, include_default=True))
@@ -316,7 +365,7 @@ def _format_docstring(
         lines.append("")
         lines.append("Args:")
         for name, schema, default_repr in param_docs:
-            desc = str(schema.get("description", "")).strip()
+            desc = _prose(schema)
             first, *rest = (desc or "").splitlines() or [""]
             suffix = f" (default: {default_repr})" if default_repr is not None else ""
             head = (first + _constraint_suffix(schema) + suffix).strip()

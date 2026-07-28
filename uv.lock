@@ -27,6 +27,7 @@ docker = [
 [package.dev-dependencies]
 dev = [
     { name = "adk-code-mode", extra = ["docker"] },
+    { name = "jsonschema-specifications" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -48,6 +49,7 @@ provides-extras = ["docker"]
 [package.metadata.requires-dev]
 dev = [
     { name = "adk-code-mode", extras = ["docker"] },
+    { name = "jsonschema-specifications", specifier = ">=2023.0.0" },
     { name = "mypy", specifier = ">=1.19.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },

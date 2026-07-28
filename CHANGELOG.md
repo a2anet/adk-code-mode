@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.3.0...adk-code-mode-v1.4.0) (2026-07-28)
+
+
+### Features
+
+* surface nested schema properties and validation keywords in tool stubs ([608d14b](https://github.com/a2anet/adk-code-mode/commit/608d14bb115159b2991c7d8d4e3c641977fd0d66))
+
+
+### Documentation
+
+* document stub schema fidelity and the `JSON_SCHEMA_FOR_FUNC_DECL` flag in `README.md` ([219f02b](https://github.com/a2anet/adk-code-mode/commit/219f02bd493c2e2d7275a0034ef2a40db933859f))
+
 ## [1.3.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.2.0...adk-code-mode-v1.3.0) (2026-07-23)
 
 

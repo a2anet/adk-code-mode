@@ -32,6 +32,47 @@ _PRIMITIVES = {
     "null": "None",
 }
 
+# Gemini `types.Schema` renames JSON Schema's keywords; map them back. A value of
+# `None` drops the key (it carries nothing a caller can act on).
+_KEY_ALIASES: dict[str, str | None] = {
+    "max_length": "maxLength",
+    "min_length": "minLength",
+    "max_items": "maxItems",
+    "min_items": "minItems",
+    "max_properties": "maxProperties",
+    "min_properties": "minProperties",
+    "any_of": "anyOf",
+    "additional_properties": "additionalProperties",
+    "property_ordering": None,
+    "title": None,
+}
+
+# Validation keywords worth showing a caller, in the order they read best. These
+# never reach the signature — no Python type expresses `maxLength` — so the
+# docstring is their only route to the model.
+_CONSTRAINTS = (
+    "format",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "const",
+    "example",
+)
+
+# Guards against self-referential schemas, which recurse forever otherwise. Not a
+# size budget: the agent can always read the full stub with `help()`.
+_MAX_SCHEMA_DEPTH = 8
+
 Target = Literal["stub", "catalog"]
 
 
@@ -59,12 +100,65 @@ def _schema_dict_from_declaration(declaration: Any) -> dict[str, Any]:
     return {}
 
 
+def _effective_schema(schema: Any) -> dict[str, Any]:
+    """Normalise a schema fragment to plain JSON Schema and flatten ``allOf``.
+
+    Two shapes reach us. With ADK's ``JSON_SCHEMA_FOR_FUNC_DECL`` feature on,
+    ``parameters_json_schema`` carries untouched JSON Schema. With it off (the
+    default today) ADK converts through a Gemini ``types.Schema``, which
+    upper-cases ``type`` and snake-cases the validation keywords — and drops the
+    body of an ``allOf``-wrapped ``$ref`` entirely, which no amount of work here
+    can recover.
+
+    Merging ``allOf`` matters because ``allOf: [$ref] + nullable: true`` is how
+    OpenAPI 3.0 spells "nullable reference": without the merge the wrapper looks
+    like an empty schema and the target's description and properties are lost.
+    """
+    if not isinstance(schema, dict):
+        return {}
+
+    normalised: dict[str, Any] = {}
+    for key, value in schema.items():
+        canonical = _KEY_ALIASES.get(key, key)
+        if canonical is None or value is None:
+            continue
+        normalised.setdefault(canonical, value)
+
+    ty = normalised.get("type")
+    if isinstance(ty, str):
+        normalised["type"] = ty.lower()
+    elif isinstance(ty, list):
+        normalised["type"] = [t.lower() if isinstance(t, str) else t for t in ty]
+
+    variants = normalised.pop("allOf", None)
+    if isinstance(variants, list):
+        merged: dict[str, Any] = {}
+        for part in variants:
+            merged.update(_effective_schema(part))
+        # The wrapper's own keys win: `nullable` sits beside the `$ref`, not in it.
+        merged.update(normalised)
+        normalised = merged
+
+    # A one-variant union expresses no choice, so fold it in rather than lose
+    # the description and properties hanging off the single branch.
+    for key in ("anyOf", "oneOf"):
+        branches = normalised.get(key)
+        if isinstance(branches, list) and len(branches) == 1:
+            folded = _effective_schema(branches[0])
+            normalised.pop(key)
+            folded.update(normalised)
+            normalised = folded
+
+    return normalised
+
+
 def _schema_to_type(schema: Any) -> str:
     """Convert a JSON-Schema fragment to a Python type expression (PEP 604).
 
     Best-effort. Anything we can't resolve cleanly falls back to ``Any``.
     """
-    if not isinstance(schema, dict):
+    schema = _effective_schema(schema)
+    if not schema:
         return "Any"
 
     # Compositions.
@@ -77,14 +171,6 @@ def _schema_to_type(schema: Any) -> str:
         if len(parts) == 1:
             return parts[0]
         return " | ".join(parts)
-    if "allOf" in schema:
-        merged: dict[str, Any] = {}
-        for part in schema["allOf"]:
-            if isinstance(part, dict):
-                merged.update(part)
-        if merged:
-            return _schema_to_type(merged)
-        return "Any"
 
     if "enum" in schema and schema["enum"]:
         lits: list[str] = []
@@ -149,21 +235,95 @@ def _python_default(schema: dict[str, Any]) -> str | None:
         return None
 
 
-def _format_docstring(*, description: str, param_docs: list[tuple[str, str, str | None]]) -> str:
+def _format_scalar(value: Any) -> str:
+    """Render a schema value compactly. Gemini widens integers to floats."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _constraint_suffix(schema: dict[str, Any], *, include_default: bool = False) -> str:
+    """Render a schema's validation keywords as ``(minimum=1, maximum=7)``.
+
+    Array constraints living on ``items`` are folded in under an ``items:``
+    prefix, so ``daysOfWeek`` shows its 1-7 bound rather than hiding it a level
+    down where the type expression has already collapsed to ``list[int]``.
+    """
+    parts = [f"{key}={_format_scalar(schema[key])}" for key in _CONSTRAINTS if key in schema]
+    if include_default and "default" in schema:
+        parts.append(f"default={_format_scalar(schema['default'])}")
+    if schema.get("additionalProperties") is False:
+        parts.append("no other keys")
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        item_schema = _effective_schema(items)
+        item_parts = [
+            f"{key}={_format_scalar(item_schema[key])}"
+            for key in _CONSTRAINTS
+            if key in item_schema
+        ]
+        if item_parts:
+            parts.append("items: " + ", ".join(item_parts))
+
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> list[str]:
+    """Lines describing an object's properties, recursing into nested schemas.
+
+    The signature can only ever say ``dict[str, Any]`` for an object, so without
+    this the key names, their types and their meanings never reach the model.
+    """
+    if depth >= _MAX_SCHEMA_DEPTH:
+        return []
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        items = schema.get("items")
+        if isinstance(items, dict):
+            return _describe_fields(_effective_schema(items), indent=indent, depth=depth + 1)
+        return []
+
+    required = set(schema.get("required") or [])
+    lines: list[str] = []
+    for name, raw in properties.items():
+        field = _effective_schema(raw)
+        head = f"{indent}{name}: {_schema_to_type(field)}"
+        if name in required:
+            head += " (required)"
+        description = str(field.get("description", "")).strip().splitlines()
+        if description:
+            head += f" - {description[0].strip()}"
+        lines.append(head + _constraint_suffix(field, include_default=True))
+        for extra in description[1:]:
+            lines.append(f"{indent}    {extra.strip()}")
+        lines.extend(_describe_fields(field, indent=indent + "    ", depth=depth + 1))
+    return lines
+
+
+def _format_docstring(
+    *, description: str, param_docs: list[tuple[str, dict[str, Any], str | None]]
+) -> str:
     lines: list[str] = []
     summary = (description or "").strip() or "Call the tool."
     lines.extend(textwrap.wrap(summary, width=88) or [summary])
     if param_docs:
         lines.append("")
         lines.append("Args:")
-        for name, desc, default_repr in param_docs:
-            desc = (desc or "").strip()
+        for name, schema, default_repr in param_docs:
+            desc = str(schema.get("description", "")).strip()
             first, *rest = (desc or "").splitlines() or [""]
             suffix = f" (default: {default_repr})" if default_repr is not None else ""
-            head = first + suffix
+            head = (first + _constraint_suffix(schema) + suffix).strip()
             lines.append(f"    {name}: {head}" if head else f"    {name}:")
             for extra in rest:
                 lines.append(f"        {extra}")
+            lines.extend(_describe_fields(schema, indent="        "))
     body = "\n    ".join(lines)
     return f'"""{body}\n    """'
 
@@ -279,7 +439,7 @@ def render_tool(nt: NamespacedTool) -> RenderedTool:
     ordered = sorted(props.items(), key=lambda kv: (kv[0] not in required, kv[0]))
 
     params: list[RenderedParam] = []
-    param_docs: list[tuple[str, str, str | None]] = []
+    param_docs: list[tuple[str, dict[str, Any], str | None]] = []
 
     seen_param_names: dict[str, str] = {}
 
@@ -293,7 +453,7 @@ def render_tool(nt: NamespacedTool) -> RenderedTool:
                 "of the tool parameters so the generated stub signature is unambiguous."
             )
         seen_param_names[py_name] = raw_name
-        subschema = subschema if isinstance(subschema, dict) else {}
+        subschema = _effective_schema(subschema)
         type_expr = _schema_to_type(subschema)
         default = _python_default(subschema)
         is_required = raw_name in required
@@ -307,7 +467,7 @@ def render_tool(nt: NamespacedTool) -> RenderedTool:
             )
         )
         doc_default = default if (not is_required and default is not None) else None
-        param_docs.append((py_name, str(subschema.get("description", "")), doc_default))
+        param_docs.append((py_name, subschema, doc_default))
 
     description = ""
     if declaration is not None and declaration.description:

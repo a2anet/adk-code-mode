@@ -252,3 +252,136 @@ def test_rendered_tool_catalog_signature_uses_ellipsis() -> None:
     sig = rt.signature_for("catalog")
     assert "include_archived: bool | None = ..." in sig
     assert "_MISSING" not in sig
+
+
+def test_render_tool_expands_nested_object_properties() -> None:
+    """An object parameter can only ever be typed ``dict[str, Any]``, so its keys
+    reach the model through the docstring or not at all."""
+    tool = _SchemaTool(
+        "create_rule",
+        description="Create a rule.",
+        schema={
+            "type": "object",
+            "properties": {
+                "conditions": {
+                    "type": "object",
+                    "description": "Conditions that must all be satisfied (AND logic).",
+                    "properties": {
+                        "daysOfWeek": {
+                            "type": "array",
+                            "description": "Days of the week (1=Monday, 7=Sunday).",
+                            "items": {"type": "integer", "minimum": 1, "maximum": 7},
+                        },
+                        "timeRange": {
+                            "type": "object",
+                            "properties": {
+                                "from": {"type": "string", "example": "18:00"},
+                                "to": {"type": "string"},
+                            },
+                        },
+                    },
+                }
+            },
+        },
+    )
+    ns = _build([(tool, None)])
+    source = _stub_source(ns[0])
+    assert "conditions: dict[str, Any] | None" in source
+    assert "daysOfWeek: list[int] - Days of the week (1=Monday, 7=Sunday)." in source
+    assert "items: minimum=1, maximum=7" in source
+    assert "timeRange: dict[str, Any]" in source
+    assert "from: str (example=18:00)" in source
+    assert "to: str" in source
+
+
+def test_render_tool_documents_validation_keywords() -> None:
+    """No Python type expresses ``maxLength``/``pattern``; the docstring is the
+    only route by which they reach the model."""
+    tool = _SchemaTool(
+        "save",
+        description="Save.",
+        schema={
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "maxLength": 255},
+                "code": {"type": "string", "pattern": "^[A-Z]{3}$"},
+                "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                "tags": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            },
+        },
+    )
+    ns = _build([(tool, None)])
+    source = _stub_source(ns[0])
+    assert "label: (maxLength=255)" in source
+    assert "code: (pattern=^[A-Z]{3}$)" in source
+    assert "ratio: (minimum=0, maximum=1)" in source
+    assert "tags: (minItems=1)" in source
+
+
+def test_render_tool_merges_allof_wrapped_ref() -> None:
+    """``allOf: [$ref] + nullable`` is how OpenAPI 3.0 spells a nullable
+    reference; without merging, the target's description and keys are lost."""
+    tool = _SchemaTool(
+        "book",
+        description="Book.",
+        schema={
+            "type": "object",
+            "properties": {
+                "capacity": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "description": "Min/max capacity range.",
+                            "properties": {
+                                "min": {"type": "integer"},
+                                "max": {"type": "integer"},
+                            },
+                        }
+                    ],
+                    "nullable": True,
+                }
+            },
+        },
+    )
+    ns = _build([(tool, None)])
+    source = _stub_source(ns[0])
+    assert "capacity: Min/max capacity range." in source
+    assert "min: int" in source
+    assert "max: int" in source
+
+
+def test_render_tool_normalises_gemini_schema_casing() -> None:
+    """With ADK's ``JSON_SCHEMA_FOR_FUNC_DECL`` off, schemas arrive via a Gemini
+    ``types.Schema``: upper-cased types and snake_cased keywords."""
+    tool = _SchemaTool(
+        "gemini_shaped",
+        description="Gemini shaped.",
+        schema={
+            "type": "OBJECT",
+            "properties": {
+                "label": {"type": "STRING", "max_length": 255},
+                "nested": {
+                    "type": "OBJECT",
+                    "properties": {"count": {"type": "INTEGER", "minimum": 1.0}},
+                },
+            },
+        },
+    )
+    ns = _build([(tool, None)])
+    source = _stub_source(ns[0])
+    assert "label: str | None" in source
+    assert "maxLength=255" in source
+    assert "count: int (minimum=1)" in source
+
+
+def test_render_tool_stops_recursing_on_self_referential_schema() -> None:
+    """A schema that contains itself must not recurse forever."""
+    node: dict[str, object] = {"type": "object", "description": "A tree node."}
+    node["properties"] = {"child": node}
+    tool = _SchemaTool(
+        "walk", description="Walk.", schema={"type": "object", "properties": {"root": node}}
+    )
+    ns = _build([(tool, None)])
+    source = _stub_source(ns[0])
+    assert "root: A tree node." in source
+    assert source.count("child: dict[str, Any]") == stubs._MAX_SCHEMA_DEPTH

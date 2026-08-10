@@ -26,7 +26,7 @@ class ToolSurfaceError(ValueError):
 
 
 class DuplicateToolNameError(ToolSurfaceError):
-    """Raised when two resolved tools share the same raw ADK tool name."""
+    """Raised when two tools in the same namespace share a raw ADK tool name."""
 
 
 class NamespaceCollisionError(ToolSurfaceError):
@@ -91,23 +91,22 @@ def build(tools: list[ResolvedTool]) -> list[NamespacedTool]:
     """
     out: list[NamespacedTool] = []
     seen_attributes: set[tuple[str | None, str]] = set()
-    seen_raw_names: dict[str, NamespacedTool] = {}
+    seen_raw_names: dict[tuple[str | None, str], NamespacedTool] = {}
     namespace_sources: dict[str, BaseToolset] = {}
     bare_attributes: dict[str, NamespacedTool] = {}
     for resolved in tools:
         namespace = _toolset_namespace(resolved.toolset) if resolved.toolset else None
-        if resolved.tool.name in seen_raw_names:
-            other = seen_raw_names[resolved.tool.name]
-            candidate = (
-                f"{namespace}.{_sanitise_identifier(resolved.tool.name, fallback='tool')}"
-                if namespace
-                else _sanitise_identifier(resolved.tool.name, fallback="tool")
-            )
+        # Raw names only have to be unique *within* a namespace: dispatch goes
+        # through the dotted path, so two toolsets may each expose ``list_items``.
+        raw_key = (namespace, resolved.tool.name)
+        if raw_key in seen_raw_names:
+            other = seen_raw_names[raw_key]
             raise DuplicateToolNameError(
-                f"Duplicate ADK tool name {resolved.tool.name!r} is not supported; this would "
-                f"make host dispatch ambiguous between {other.dotted_path!r} (from "
-                f"{_origin(other.resolved)}) and {candidate!r} (from {_origin(resolved)}). "
-                "Rename one of the tools or apply distinct ``tool_name_prefix`` values."
+                f"Duplicate ADK tool name {resolved.tool.name!r} within namespace "
+                f"{namespace or 'tools'!r} is not supported; this would make host dispatch "
+                f"ambiguous for {other.dotted_path!r} (from {_origin(other.resolved)} and "
+                f"{_origin(resolved)}). Rename one of the tools or apply distinct "
+                "``tool_name_prefix`` values."
             )
         if namespace is not None and resolved.toolset is not None:
             existing_source = namespace_sources.get(namespace)
@@ -138,7 +137,7 @@ def build(tools: list[ResolvedTool]) -> list[NamespacedTool]:
             )
         seen_attributes.add(key)
         nt = NamespacedTool(resolved=resolved, namespace=namespace, attribute=attribute)
-        seen_raw_names[resolved.tool.name] = nt
+        seen_raw_names[raw_key] = nt
         if namespace is None:
             bare_attributes[attribute] = nt
         out.append(nt)
@@ -167,15 +166,12 @@ class Registry:
 
     def __init__(self, tools: list[NamespacedTool]) -> None:
         self._by_path: dict[str, NamespacedTool] = {t.dotted_path: t for t in tools}
-        by_tool_name: dict[str, NamespacedTool] = {}
+        # Generated stubs call ``_call(<dotted path>, ...)``, so this map is only a
+        # fallback for callers that know the raw ADK name. A name shared by two
+        # namespaces is ambiguous and simply doesn't resolve through it.
+        by_tool_name: dict[str, NamespacedTool | None] = {}
         for tool in tools:
-            existing = by_tool_name.get(tool.tool_name)
-            if existing is not None:
-                raise DuplicateToolNameError(
-                    "Duplicate ADK tool name "
-                    f"{tool.tool_name!r} is not supported; use unique tool names."
-                )
-            by_tool_name[tool.tool_name] = tool
+            by_tool_name[tool.tool_name] = None if tool.tool_name in by_tool_name else tool
         self._by_tool_name = by_tool_name
         self._tools = list(tools)
 
@@ -187,10 +183,11 @@ class Registry:
         return self._by_path.get(path)
 
     def by_tool_name(self, tool_name: str) -> NamespacedTool | None:
+        """Resolve a raw ADK name, or ``None`` if unknown or shared by two namespaces."""
         return self._by_tool_name.get(tool_name)
 
     def resolve_call(self, name: str) -> NamespacedTool:
-        """Accept either the dotted path or the original ``BaseTool.name``."""
+        """Accept either the dotted path or an unambiguous original ``BaseTool.name``."""
         hit = self._by_path.get(name) or self._by_tool_name.get(name)
         if hit is None:
             raise KeyError(f"no tool registered for {name!r}")

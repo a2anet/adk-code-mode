@@ -83,6 +83,18 @@ def test_render_catalog_includes_top_level_tools_section() -> None:
     assert "def echo(*, message: str) -> Any:" in catalog
 
 
+def test_render_catalog_keeps_a_shared_tool_name_in_both_namespaces() -> None:
+    bookings = _FakeToolset("bookings")
+    inventory = _FakeToolset("inventory")
+    a = _SchemaTool("list_items", description="List bookings.", schema={"type": "object"})
+    b = _SchemaTool("list_items", description="List inventory.", schema={"type": "object"})
+    catalog = render_catalog(_build([(a, bookings), (b, inventory)]))
+    assert "from tools.bookings import list_items" in catalog
+    assert "from tools.inventory import list_items" in catalog
+    assert '"""List bookings.' in catalog
+    assert '"""List inventory.' in catalog
+
+
 def test_render_catalog_groups_tools_by_namespace_and_sorts() -> None:
     slack = _FakeToolset("slack")
     gmail = _FakeToolset("gmail")

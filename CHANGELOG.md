@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.4.0...adk-code-mode-v1.5.0) (2026-08-10)
+
+
+### Features
+
+* scope tool-name uniqueness to each namespace ([#17](https://github.com/a2anet/adk-code-mode/issues/17)) ([437bc0d](https://github.com/a2anet/adk-code-mode/commit/437bc0dc930521a933e5c25b4bd6103e9434fc27))
+
 ## [1.4.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.3.0...adk-code-mode-v1.4.0) (2026-07-28)
 
 

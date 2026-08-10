@@ -61,14 +61,14 @@ from google.adk.agents import LlmAgent
 from google.adk.features import FeatureName, override_feature_enabled
 from adk_code_mode import ExecuteCodeTool, RemoteBackend
 
-# Required for docstrings to show full tool schemas.
+# Required for docstrings to show full tool schemas
 override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
 
 tool = ExecuteCodeTool(
     tools=[my_fn_tool, McpToolset(...), OpenAPIToolset(...)],
     backend=RemoteBackend(
-        url="https://sandbox-xyz.run.app",  # your deployed sandbox URL
-        token="your-secret-token",           # bearer token for auth
+        url="https://sandbox-xyz.run.app",
+        token="your-secret-token",
     ),
 )
 
@@ -92,7 +92,7 @@ root_agent = LlmAgent(
 from google.adk.features import FeatureName, override_feature_enabled
 from adk_code_mode import ExecuteCodeTool, UnsafeLocalDockerBackend
 
-# Required for docstrings to show full tool schemas.
+# Required for docstrings to show full tool schemas
 override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
 
 tool = ExecuteCodeTool(

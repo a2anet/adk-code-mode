@@ -58,7 +58,11 @@ Build an `ExecuteCodeTool`, give it the tools the sandboxed code may call, and a
 
 ```python
 from google.adk.agents import LlmAgent
+from google.adk.features import FeatureName, override_feature_enabled
 from adk_code_mode import ExecuteCodeTool, RemoteBackend
+
+# Required for docstrings to show full tool schemas.
+override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
 
 tool = ExecuteCodeTool(
     tools=[my_fn_tool, McpToolset(...), OpenAPIToolset(...)],
@@ -85,7 +89,11 @@ root_agent = LlmAgent(
 > **`UnsafeLocalDockerBackend` is not safe for production or multi-tenant use.** See [Safety](#-safety).
 
 ```python
+from google.adk.features import FeatureName, override_feature_enabled
 from adk_code_mode import ExecuteCodeTool, UnsafeLocalDockerBackend
+
+# Required for docstrings to show full tool schemas.
+override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
 
 tool = ExecuteCodeTool(
     tools=[my_fn_tool, McpToolset(...), OpenAPIToolset(...)],
@@ -349,38 +357,6 @@ from tools import save_artifact, load_artifact, list_artifacts
 Tags are indented; their content is not. The `<tools-package>` body is Python source, where leading whitespace is meaningful. Each installed-package line is `<import name>: <distribution> <version>`; namespace imports supplied by multiple distributions list every provider in deterministic order. Import names and providers are sorted so the block stays byte-stable for prompt caching. `<python-version>` and `<installed-packages>` are omitted entirely — rather than rendered blank — when the sandbox hasn't reported yet or the image has no extra packages, since an empty tag reads as "none exist".
 
 With `save_tool_results_as_artifacts` enabled (the default), each non-artifact tool above — e.g. `list_channels` and `send_message` — also carries two optional `artifact_name: str | None = ...` / `artifact_description: str | None = ...` parameters for naming its saved result.
-
-#### Schema fidelity
-
-Stubs are rendered from each tool's declaration, so whatever the declaration drops can never reach the model. Nested object properties, their descriptions and JSON Schema's validation keywords all land in the docstring, because no Python type expresses them:
-
-~~~python
-def create_minimum_spend_rule(*, space_id: int, conditions: dict[str, Any] | None = ..., label: str | None = ...) -> Any:
-    """Creates a new minimum spend rule under the MinimumSpend policy.
-
-    Args:
-        space_id: The unique identifier of the venue space. (format=int32)
-        conditions: Conditions that must all be satisfied for the rule to apply (AND logic).
-            daysOfWeek: list[int] | None - Days of the week (1=Monday, 7=Sunday). (items: minimum=1, maximum=7)
-            timeRange: dict[str, Any] | None - Time window of the booking start time.
-                from: str (pattern=^([01][0-9]|2[0-3]):[0-5][0-9]$, example=18:00)
-                to: str (example=23:59)
-        label: (maxLength=255)
-    """
-~~~
-
-Every JSON Schema 2020-12 Validation and Meta-Data keyword is covered; `tests/test_stubs_json_schema.py` reads the keyword set from the meta-schemas and fails if one goes unclassified.
-
-> [!IMPORTANT]
-> **Enable ADK's `JSON_SCHEMA_FOR_FUNC_DECL` feature to get the full picture.** It is off by default, and without it ADK builds declarations through a Gemini `types.Schema`, which reduces an `allOf`-wrapped `$ref` — how OpenAPI 3.0 spells a nullable reference — to a bare `{"type": "OBJECT"}`. The referenced properties and description are gone before this package sees them, and the field renders as an empty `dict[str, Any]`.
->
-> ```python
-> from google.adk.features import FeatureName, override_feature_enabled
->
-> override_feature_enabled(FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True)
-> ```
->
-> Or set `ADK_ENABLE_JSON_SCHEMA_FOR_FUNC_DECL=1` in the environment. Do this before building any tool. It changes how declarations are built for every tool in the process, so if the same process also exposes tools to the model directly, check the model layer accepts `parameters_json_schema` — ADK's LiteLLM integration does, and `ExecuteCodeTool` declares itself that way regardless.
 
 #### Fitting the budget
 

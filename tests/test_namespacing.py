@@ -89,6 +89,9 @@ def test_bare_tool_may_share_a_name_with_a_namespaced_tool() -> None:
     ]
     ns = namespacing.build(tools)
     assert [t.dotted_path for t in ns] == ["ping", "slack.ping"]
+    reg = namespacing.Registry(ns)
+    assert reg.resolve_call("ping") is ns[0]
+    assert reg.resolve_call("slack.ping") is ns[1]
 
 
 def test_python_identifier_collisions_raise() -> None:

@@ -24,7 +24,11 @@ from google.genai import types as genai_types
 
 from adk_code_mode.runtime.base import SandboxConnectionError, SandboxResult, SandboxSession
 from adk_code_mode.runtime.protocol import PROTOCOL_VERSION, DoneFrame, Frame, ReadyFrame
-from adk_code_mode.tool import ExecuteCodeTool, ProtocolVersionMismatchError
+from adk_code_mode.tool import (
+    DEFAULT_TIMEOUT_SECONDS,
+    ExecuteCodeTool,
+    ProtocolVersionMismatchError,
+)
 
 from ._fake_runtime import FakeRuntime
 
@@ -360,6 +364,11 @@ async def test_timeout_terminates_hung_sandbox() -> None:
     result = await _run(tool, ctx, "while True:\n    pass\n", call_id="run-timeout")
     assert result["stdout"] == ""
     assert "Execution exceeded timeout of 1s" in result["stderr"]
+
+
+def test_a_block_is_bounded_without_the_host_saying_so() -> None:
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime())
+    assert tool.timeout_seconds == DEFAULT_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

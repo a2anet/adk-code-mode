@@ -97,6 +97,11 @@ class _BlockConnectionLost(Exception):
 
 logger = logging.getLogger("adk_code_mode.tool")
 
+# A block is a model-authored program, so it is bounded by default: an unbounded one
+# strands its container (the idle reaper skips turns still in use) and holds up
+# whatever is waiting on the turn. Hosts that genuinely need longer pass their own.
+DEFAULT_TIMEOUT_SECONDS = 60
+
 _REAPER_MAX_POLL_SECONDS = 30.0
 
 # One block runs at most twice: the original attempt plus a single reconnect, and
@@ -202,7 +207,7 @@ class ExecuteCodeTool(BaseTool):
         max_code_mode_metadata_chars: int = 50_000,
         max_output_chars: int = 50_000,
         max_code_chars: int = 1_000_000,
-        timeout_seconds: int | None = None,
+        timeout_seconds: int | None = DEFAULT_TIMEOUT_SECONDS,
         per_tool_timeout_seconds: float | None = None,
         session_idle_timeout_seconds: float = 600,
         on_artifacts_saved: ArtifactsSavedCallback | None = None,
@@ -241,7 +246,9 @@ class ExecuteCodeTool(BaseTool):
           max_code_chars: Rejects oversized code payloads before starting a
             container.
           timeout_seconds: Caps overall execution time of one ``execute_code``
-            call.
+            call, and with it every tool the block calls. ``None`` lifts the cap,
+            which leaves a runaway block stranding its container until the idle
+            reaper takes it.
           per_tool_timeout_seconds: Caps each individual tool call made from
             within the sandbox.
           session_idle_timeout_seconds: Idle reaper: closes a turn's container

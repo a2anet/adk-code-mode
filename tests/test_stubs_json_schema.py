@@ -224,6 +224,35 @@ class TestApplicatorVocabulary:
             required=["pair"],
         )
         assert "pair: tuple[str, int]" in source
+        # Primitive slots are already in the type; don't repeat them.
+        assert "[0]:" not in source
+        assert "[1]:" not in source
+
+    def test_prefix_items_object_slots_expand_their_properties(self) -> None:
+        source = _render(
+            {
+                "pair": {
+                    "type": "array",
+                    "prefixItems": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "required": ["lat", "lng"],
+                            "properties": {
+                                "lat": {"type": "number"},
+                                "lng": {"type": "number"},
+                            },
+                        },
+                    ],
+                }
+            },
+            required=["pair"],
+        )
+        assert "pair: tuple[str, dict[str, Any]]" in source
+        assert "[1]: dict[str, Any]" in source
+        assert "lat: float (required)" in source
+        assert "lng: float (required)" in source
+        assert "[0]:" not in source
 
     def test_additional_properties_schema_types_an_open_map(self) -> None:
         source = _render(
@@ -267,6 +296,29 @@ class TestApplicatorVocabulary:
         )
         assert "Min/max capacity range." in source
         assert "min: int" in source
+
+    def test_allof_merges_properties_from_each_branch(self) -> None:
+        """OpenAPI 3.0 extends a `$ref` with extra fields via a second `allOf`
+        object; those keys must join the first object's, not replace them."""
+        source = _render(
+            {
+                "page": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "required": ["limit"],
+                            "properties": {"limit": {"type": "integer"}},
+                        },
+                        {
+                            "required": ["cursor"],
+                            "properties": {"cursor": {"type": "string"}},
+                        },
+                    ]
+                }
+            }
+        )
+        assert "limit: int (required)" in source
+        assert "cursor: str (required)" in source
 
     def test_anyof_becomes_a_union_and_a_lone_branch_is_folded(self) -> None:
         source = _render(
@@ -379,6 +431,42 @@ class TestApplicatorVocabulary:
         assert "(kind=stdio)" in source
         assert "path: str" in source
         assert "command: str" in source
+
+    def test_shared_properties_are_listed_before_oneof_branches(self) -> None:
+        source = _render(
+            {
+                "payment": {
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["card"]},
+                                "cardNumber": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["bank"]},
+                                "iban": {"type": "string"},
+                            },
+                        },
+                    ],
+                }
+            }
+        )
+        assert "id: str (required)" in source
+        assert "(type=card)" in source
+        assert "cardNumber: str" in source
+        assert "(type=bank)" in source
+        assert "iban: str" in source
+        id_at = source.index("id: str (required)")
+        card_at = source.index("(type=card)")
+        or_at = source.index("-- or --")
+        bank_at = source.index("(type=bank)")
+        assert id_at < card_at < or_at < bank_at
 
 
 class TestMetaDataVocabulary:

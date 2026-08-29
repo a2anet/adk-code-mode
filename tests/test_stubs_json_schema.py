@@ -224,6 +224,35 @@ class TestApplicatorVocabulary:
             required=["pair"],
         )
         assert "pair: tuple[str, int]" in source
+        # Primitive slots are already in the type; don't repeat them.
+        assert "[0]:" not in source
+        assert "[1]:" not in source
+
+    def test_prefix_items_object_slots_expand_their_properties(self) -> None:
+        source = _render(
+            {
+                "pair": {
+                    "type": "array",
+                    "prefixItems": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "required": ["lat", "lng"],
+                            "properties": {
+                                "lat": {"type": "number"},
+                                "lng": {"type": "number"},
+                            },
+                        },
+                    ],
+                }
+            },
+            required=["pair"],
+        )
+        assert "pair: tuple[str, dict[str, Any]]" in source
+        assert "[1]: dict[str, Any]" in source
+        assert "lat: float (required)" in source
+        assert "lng: float (required)" in source
+        assert "[0]:" not in source
 
     def test_additional_properties_schema_types_an_open_map(self) -> None:
         source = _render(
@@ -268,6 +297,29 @@ class TestApplicatorVocabulary:
         assert "Min/max capacity range." in source
         assert "min: int" in source
 
+    def test_allof_merges_properties_from_each_branch(self) -> None:
+        """OpenAPI 3.0 extends a `$ref` with extra fields via a second `allOf`
+        object; those keys must join the first object's, not replace them."""
+        source = _render(
+            {
+                "page": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "required": ["limit"],
+                            "properties": {"limit": {"type": "integer"}},
+                        },
+                        {
+                            "required": ["cursor"],
+                            "properties": {"cursor": {"type": "string"}},
+                        },
+                    ]
+                }
+            }
+        )
+        assert "limit: int (required)" in source
+        assert "cursor: str (required)" in source
+
     def test_anyof_becomes_a_union_and_a_lone_branch_is_folded(self) -> None:
         source = _render(
             {
@@ -279,6 +331,185 @@ class TestApplicatorVocabulary:
         assert "many: str | int" in source
         assert "one: str" in source
         assert "Only branch." in source
+        # Primitive unions belong in the type expression, not a second listing.
+        assert "-- or --" not in source
+
+    def test_oneof_object_branches_expand_their_properties(self) -> None:
+        """A discriminator union has no `properties` at the `oneOf` itself.
+
+        Folding only the single-branch case leaves `list[dict[str, Any]]` with
+        an empty docstring — the shape of `create_agent(tools=...)`.
+        """
+        source = _render(
+            {
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["type", "specUrl"],
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["openapi"]},
+                                    "specUrl": {"type": "string"},
+                                    "operationOverrides": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["sourceId", "enabled"],
+                                            "properties": {
+                                                "sourceId": {"type": "string"},
+                                                "enabled": {"type": "boolean"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["type", "url"],
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["mcp"]},
+                                    "url": {"type": "string"},
+                                    "toolOverrides": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["sourceId", "enabled"],
+                                            "properties": {
+                                                "sourceId": {"type": "string"},
+                                                "enabled": {"type": "boolean"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        ]
+                    },
+                }
+            },
+            required=["tools"],
+        )
+        assert "tools: list[dict[str, Any]]" in source
+        assert "(type=openapi) (no other keys)" in source
+        assert "specUrl: str (required)" in source
+        assert "operationOverrides: list[dict[str, Any]]" in source
+        assert "-- or --" in source
+        assert "(type=mcp) (no other keys)" in source
+        assert "url: str (required)" in source
+        assert "toolOverrides: list[dict[str, Any]]" in source
+        assert "sourceId: str (required)" in source
+        assert "enabled: bool (required)" in source
+
+    def test_oneof_uses_discriminator_property_for_the_branch_tag(self) -> None:
+        source = _render(
+            {
+                "tool": {
+                    "discriminator": {"propertyName": "kind"},
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "http"},
+                                "path": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "stdio"},
+                                "command": {"type": "string"},
+                            },
+                        },
+                    ],
+                }
+            }
+        )
+        assert "(kind=http)" in source
+        assert "(kind=stdio)" in source
+        assert "path: str" in source
+        assert "command: str" in source
+
+    def test_parent_required_applies_to_oneof_branch_properties(self) -> None:
+        source = _render(
+            {
+                "target": {
+                    "required": ["value"],
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"value": {"type": "integer"}},
+                        },
+                    ],
+                }
+            }
+        )
+        assert "value: str (required)" in source
+        assert "value: int (required)" in source
+
+    def test_oneof_branch_prose_is_preserved(self) -> None:
+        source = _render(
+            {
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "title": "Email target",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                        {
+                            "type": "object",
+                            "description": "Phone target.",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                    ],
+                }
+            }
+        )
+        assert "Email target" in source
+        assert "Phone target." in source
+
+    def test_shared_properties_are_listed_before_oneof_branches(self) -> None:
+        source = _render(
+            {
+                "payment": {
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["card"]},
+                                "cardNumber": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["bank"]},
+                                "iban": {"type": "string"},
+                            },
+                        },
+                    ],
+                }
+            }
+        )
+        assert "id: str (required)" in source
+        assert "(type=card)" in source
+        assert "cardNumber: str" in source
+        assert "(type=bank)" in source
+        assert "iban: str" in source
+        id_at = source.index("id: str (required)")
+        card_at = source.index("(type=card)")
+        or_at = source.index("-- or --")
+        bank_at = source.index("(type=bank)")
+        assert id_at < card_at < or_at < bank_at
 
 
 class TestMetaDataVocabulary:

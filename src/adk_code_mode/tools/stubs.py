@@ -151,10 +151,9 @@ def _effective_schema(schema: Any) -> dict[str, Any]:
     if isinstance(variants, list):
         merged: dict[str, Any] = {}
         for part in variants:
-            merged.update(_effective_schema(part))
-        # The wrapper's own keys win: `nullable` sits beside the `$ref`, not in it.
-        merged.update(normalised)
-        normalised = merged
+            merged = _merge_schema(merged, _effective_schema(part))
+        # Wrapper keys (e.g. `nullable`) win; `properties` / `required` still merge.
+        normalised = _merge_schema(merged, normalised)
 
     # A one-variant union expresses no choice, so fold it in rather than lose
     # the description and properties hanging off the single branch.
@@ -163,10 +162,40 @@ def _effective_schema(schema: Any) -> dict[str, Any]:
         if isinstance(branches, list) and len(branches) == 1:
             folded = _effective_schema(branches[0])
             normalised.pop(key)
-            folded.update(normalised)
-            normalised = folded
+            normalised = _merge_schema(folded, normalised)
 
     return normalised
+
+
+def _merge_schema(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Combine two schemas the way ``allOf`` means: properties accumulate.
+
+    A shallow ``update`` replaces the whole ``properties`` dict, so OpenAPI 3.0
+    ``allOf: [$ref, {properties: extra}]`` would keep only ``extra``.
+    """
+    out = dict(base)
+    extra_props = extra.get("properties")
+    if isinstance(extra_props, dict):
+        props = dict(out.get("properties") or {})
+        for name, schema in extra_props.items():
+            existing = props.get(name)
+            if isinstance(existing, dict) and isinstance(schema, dict):
+                props[name] = _merge_schema(existing, schema)
+            else:
+                props[name] = schema
+        out["properties"] = props
+    extra_required = extra.get("required")
+    if isinstance(extra_required, list):
+        required = [name for name in (out.get("required") or []) if isinstance(name, str)]
+        for name in extra_required:
+            if isinstance(name, str) and name not in required:
+                required.append(name)
+        out["required"] = required
+    for key, value in extra.items():
+        if key in ("properties", "required"):
+            continue
+        out[key] = value
+    return out
 
 
 def _schema_to_type(schema: Any) -> str:
@@ -322,23 +351,93 @@ def _prose(schema: dict[str, Any]) -> str:
     return ""
 
 
-def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> list[str]:
-    """Lines describing an object's properties, recursing into nested schemas.
+def _const_or_single_enum(schema: dict[str, Any]) -> str | None:
+    """A branch tag value: ``const`` or a one-element ``enum``."""
+    if "const" in schema:
+        return _format_scalar(schema["const"])
+    enum = schema.get("enum")
+    if isinstance(enum, list) and len(enum) == 1:
+        return _format_scalar(enum[0])
+    return None
 
-    The signature can only ever say ``dict[str, Any]`` for an object, so without
-    this the key names, their types and their meanings never reach the model.
+
+def _union_branch_tag(branch: dict[str, Any], *, discriminator: str | None) -> str | None:
+    """Label a union branch without implying a nested object key.
+
+    OpenAPI discriminator unions (``type: openapi | mcp``) often lose
+    ``discriminator`` once ADK inlines ``$ref`` into ``items``, leaving only a
+    single-value ``type`` enum on each object. Tag as ``(type=openapi)`` rather
+    than a fake ``openapi:`` key the model might nest under.
     """
-    if depth >= _MAX_SCHEMA_DEPTH:
-        return []
+    props = branch.get("properties")
+    if not isinstance(props, dict):
+        return None
+    names: list[str] = []
+    if discriminator:
+        names.append(discriminator)
+    if "type" not in names:
+        names.append("type")
+    for name in names:
+        raw = props.get(name)
+        if not isinstance(raw, dict):
+            continue
+        value = _const_or_single_enum(_effective_schema(raw))
+        if value is not None:
+            return f"{name}={value}"
+    return None
 
+
+def _describe_union(
+    schema: dict[str, Any], variants: list[Any], *, indent: str, depth: int
+) -> list[str]:
+    """Expand object ``oneOf``/``anyOf`` branches into the docstring.
+
+    The signature collapses every object variant to ``dict[str, Any]``, so
+    without this the keys on a discriminator union never reach the model.
+    Primitive-only unions stay in the type expression and are skipped here.
+    """
+    disc = schema.get("discriminator")
+    discriminator = None
+    if isinstance(disc, dict):
+        name = disc.get("propertyName")
+        if isinstance(name, str) and name:
+            discriminator = name
+
+    parent_required = schema.get("required")
+    lines: list[str] = []
+    for raw in variants:
+        branch = _effective_schema(raw)
+        if isinstance(parent_required, list):
+            branch = _merge_schema(branch, {"required": parent_required})
+        nested = _describe_fields(branch, indent=indent, depth=depth + 1)
+        if not nested:
+            continue
+        if lines:
+            lines.append(f"{indent}-- or --")
+        tag = _union_branch_tag(branch, discriminator=discriminator)
+        description = _prose(branch).splitlines()
+        suffix = _constraint_suffix(branch)
+        if tag:
+            head = f"{indent}({tag})"
+            if description:
+                head += f" - {description[0].strip()}"
+            lines.append(head + suffix)
+        elif description:
+            lines.append(f"{indent}{description[0].strip()}{suffix}")
+        elif suffix:
+            lines.append(f"{indent}{suffix.strip()}")
+        for extra in description[1:]:
+            lines.append(f"{indent}    {extra.strip()}")
+        lines.extend(nested)
+    return lines
+
+
+def _describe_properties(schema: dict[str, Any], *, indent: str, depth: int) -> list[str]:
+    """One line per object property, plus nested expansion."""
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not properties:
-        items = schema.get("items")
-        if isinstance(items, dict):
-            return _describe_fields(_effective_schema(items), indent=indent, depth=depth + 1)
         return []
-
-    required = set(schema.get("required") or [])
+    required = {name for name in (schema.get("required") or []) if isinstance(name, str)}
     lines: list[str] = []
     for name, raw in properties.items():
         field = _effective_schema(raw)
@@ -352,6 +451,63 @@ def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> 
         for extra in description[1:]:
             lines.append(f"{indent}    {extra.strip()}")
         lines.extend(_describe_fields(field, indent=indent + "    ", depth=depth + 1))
+    return lines
+
+
+def _describe_prefix_items(schema: dict[str, Any], *, indent: str, depth: int) -> list[str]:
+    """Expand object (or union) slots of a ``prefixItems`` tuple.
+
+    Primitive slots are already in the ``tuple[...]`` type expression.
+    """
+    prefix_items = schema.get("prefixItems")
+    if not isinstance(prefix_items, list) or not prefix_items:
+        return []
+    lines: list[str] = []
+    for index, raw in enumerate(prefix_items):
+        field = _effective_schema(raw)
+        nested = _describe_fields(field, indent=indent + "    ", depth=depth + 1)
+        if not nested:
+            continue
+        head = f"{indent}[{index}]: {_schema_to_type(field)}"
+        description = _prose(field).splitlines()
+        if description:
+            head += f" - {description[0].strip()}"
+        lines.append(head + _constraint_suffix(field, include_default=True))
+        for extra in description[1:]:
+            lines.append(f"{indent}    {extra.strip()}")
+        lines.extend(nested)
+    return lines
+
+
+def _describe_fields(schema: dict[str, Any], *, indent: str, depth: int = 0) -> list[str]:
+    """Lines describing an object's properties, recursing into nested schemas.
+
+    The signature can only ever say ``dict[str, Any]`` for an object, so without
+    this the key names, their types and their meanings never reach the model.
+    Multi-branch ``oneOf``/``anyOf`` is walked the same way: a single-branch
+    union is folded in ``_effective_schema``, but two object variants have no
+    ``properties`` at the union itself. Shared parent ``properties`` are listed
+    first, then the branches.
+    """
+    if depth >= _MAX_SCHEMA_DEPTH:
+        return []
+
+    schema = _effective_schema(schema)
+
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    lines = _describe_properties(schema, indent=indent, depth=depth)
+    if isinstance(variants, list) and len(variants) > 1:
+        lines.extend(_describe_union(schema, variants, indent=indent, depth=depth))
+    if lines:
+        return lines
+
+    prefix_lines = _describe_prefix_items(schema, indent=indent, depth=depth)
+    if prefix_lines:
+        return prefix_lines
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        return _describe_fields(items, indent=indent, depth=depth + 1)
     return lines
 
 

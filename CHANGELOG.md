@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.5.0...adk-code-mode-v1.6.0) (2026-08-29)
+
+
+### Features
+
+* bound an execute_code block by default ([1609c0d](https://github.com/a2anet/adk-code-mode/commit/1609c0d24b8563cba51434cd1214b4299aeefc86))
+* expand object oneOf/anyOf branches in tool stub docstrings ([#20](https://github.com/a2anet/adk-code-mode/issues/20)) ([7d42cb1](https://github.com/a2anet/adk-code-mode/commit/7d42cb1ee9d9e217d008776dc74a84034f4b67a9))
+
 ## [1.5.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.4.0...adk-code-mode-v1.5.0) (2026-08-10)
 
 

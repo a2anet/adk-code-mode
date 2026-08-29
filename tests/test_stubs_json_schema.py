@@ -432,6 +432,49 @@ class TestApplicatorVocabulary:
         assert "path: str" in source
         assert "command: str" in source
 
+    def test_parent_required_applies_to_oneof_branch_properties(self) -> None:
+        source = _render(
+            {
+                "target": {
+                    "required": ["value"],
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"value": {"type": "integer"}},
+                        },
+                    ],
+                }
+            }
+        )
+        assert "value: str (required)" in source
+        assert "value: int (required)" in source
+
+    def test_oneof_branch_prose_is_preserved(self) -> None:
+        source = _render(
+            {
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "title": "Email target",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                        {
+                            "type": "object",
+                            "description": "Phone target.",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                    ],
+                }
+            }
+        )
+        assert "Email target" in source
+        assert "Phone target." in source
+
     def test_shared_properties_are_listed_before_oneof_branches(self) -> None:
         source = _render(
             {

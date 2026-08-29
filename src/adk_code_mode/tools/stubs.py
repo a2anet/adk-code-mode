@@ -403,20 +403,31 @@ def _describe_union(
         if isinstance(name, str) and name:
             discriminator = name
 
+    parent_required = schema.get("required")
     lines: list[str] = []
     for raw in variants:
         branch = _effective_schema(raw)
+        if isinstance(parent_required, list):
+            branch = _merge_schema(branch, {"required": parent_required})
         nested = _describe_fields(branch, indent=indent, depth=depth + 1)
         if not nested:
             continue
         if lines:
             lines.append(f"{indent}-- or --")
         tag = _union_branch_tag(branch, discriminator=discriminator)
+        description = _prose(branch).splitlines()
         suffix = _constraint_suffix(branch)
         if tag:
-            lines.append(f"{indent}({tag}){suffix}")
+            head = f"{indent}({tag})"
+            if description:
+                head += f" - {description[0].strip()}"
+            lines.append(head + suffix)
+        elif description:
+            lines.append(f"{indent}{description[0].strip()}{suffix}")
         elif suffix:
             lines.append(f"{indent}{suffix.strip()}")
+        for extra in description[1:]:
+            lines.append(f"{indent}    {extra.strip()}")
         lines.extend(nested)
     return lines
 

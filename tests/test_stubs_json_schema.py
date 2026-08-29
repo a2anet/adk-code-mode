@@ -279,6 +279,106 @@ class TestApplicatorVocabulary:
         assert "many: str | int" in source
         assert "one: str" in source
         assert "Only branch." in source
+        # Primitive unions belong in the type expression, not a second listing.
+        assert "-- or --" not in source
+
+    def test_oneof_object_branches_expand_their_properties(self) -> None:
+        """A discriminator union has no `properties` at the `oneOf` itself.
+
+        Folding only the single-branch case leaves `list[dict[str, Any]]` with
+        an empty docstring — the shape of `create_agent(tools=...)`.
+        """
+        source = _render(
+            {
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["type", "specUrl"],
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["openapi"]},
+                                    "specUrl": {"type": "string"},
+                                    "operationOverrides": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["sourceId", "enabled"],
+                                            "properties": {
+                                                "sourceId": {"type": "string"},
+                                                "enabled": {"type": "boolean"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["type", "url"],
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["mcp"]},
+                                    "url": {"type": "string"},
+                                    "toolOverrides": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["sourceId", "enabled"],
+                                            "properties": {
+                                                "sourceId": {"type": "string"},
+                                                "enabled": {"type": "boolean"},
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        ]
+                    },
+                }
+            },
+            required=["tools"],
+        )
+        assert "tools: list[dict[str, Any]]" in source
+        assert "(type=openapi) (no other keys)" in source
+        assert "specUrl: str (required)" in source
+        assert "operationOverrides: list[dict[str, Any]]" in source
+        assert "-- or --" in source
+        assert "(type=mcp) (no other keys)" in source
+        assert "url: str (required)" in source
+        assert "toolOverrides: list[dict[str, Any]]" in source
+        assert "sourceId: str (required)" in source
+        assert "enabled: bool (required)" in source
+
+    def test_oneof_uses_discriminator_property_for_the_branch_tag(self) -> None:
+        source = _render(
+            {
+                "tool": {
+                    "discriminator": {"propertyName": "kind"},
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "http"},
+                                "path": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "stdio"},
+                                "command": {"type": "string"},
+                            },
+                        },
+                    ],
+                }
+            }
+        )
+        assert "(kind=http)" in source
+        assert "(kind=stdio)" in source
+        assert "path: str" in source
+        assert "command: str" in source
 
 
 class TestMetaDataVocabulary:

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.6.0...adk-code-mode-v1.6.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* exit the sandbox when the host disconnects mid-block ([bd3fb0f](https://github.com/a2anet/adk-code-mode/commit/bd3fb0fb0d8a0cab9370f2ad6db56dfacf566cb4))
+
 ## [1.6.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.5.0...adk-code-mode-v1.6.0) (2026-08-29)
 
 

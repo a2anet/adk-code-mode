@@ -228,7 +228,6 @@ def main() -> int:
         port = int(os.environ.get("PORT", "8080"))
         token = os.environ.get(AUTH_TOKEN_ENV)
         asyncio.run(serve(port, token))
-        return 0
 
     reader, writer = _open_control_streams()
     client = RpcClient(reader=reader, writer=writer)

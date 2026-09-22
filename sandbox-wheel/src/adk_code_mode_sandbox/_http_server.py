@@ -38,7 +38,7 @@ import shutil
 import tarfile
 import tempfile
 from http import HTTPStatus
-from typing import Any
+from typing import Any, NoReturn
 
 import websockets
 import websockets.asyncio.server
@@ -112,10 +112,11 @@ class _WsBridgeWriter:
         pass
 
 
-async def serve(port: int, token: str | None) -> None:
+async def serve(port: int, token: str | None) -> NoReturn:
     """Start the WebSocket server on *port* with optional bearer *token* auth.
 
-    Accepts exactly one WebSocket connection, runs user code, then returns.
+    Accepts exactly one WebSocket connection, runs user code, then exits the
+    process.
     """
     stop = asyncio.Event()
     accepted = False
@@ -136,9 +137,15 @@ async def serve(port: int, token: str | None) -> None:
         return None
 
     async def handler(ws: Any) -> None:
+        turn = asyncio.create_task(_handle_connection(ws))
+        # End the turn when the socket closes, even mid-block: user code that
+        # ignores the disconnect would otherwise keep this single-use container
+        # alive, answering every later connection with "Busy".
+        ws_closed = asyncio.create_task(ws.wait_closed())
+        ws_closed.add_done_callback(lambda _: turn.cancel())
         try:
-            await _handle_connection(ws)
-        except websockets.ConnectionClosed:
+            await turn
+        except (websockets.ConnectionClosed, asyncio.CancelledError):
             logger.debug("client disconnected")
         except Exception:
             logger.exception("error handling WebSocket connection")
@@ -154,6 +161,9 @@ async def serve(port: int, token: str | None) -> None:
     ):
         logger.info("sandbox HTTP server listening on port %d", port)
         await stop.wait()
+    # Don't let interpreter shutdown join a worker thread still running user code
+    # the host has given up on.
+    os._exit(0)
 
 
 async def _handle_connection(ws: Any) -> None:

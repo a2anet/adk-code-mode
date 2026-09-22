@@ -340,3 +340,38 @@ async def test_remote_close_shuts_the_container_down(
             break
         await asyncio.sleep(0.02)
     assert http_server.poll() is not None  # container exited after ShutdownFrame
+
+
+@pytest.mark.asyncio
+async def test_remote_timed_out_block_shuts_the_container_down(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    """A block still running when the host gives up doesn't keep the server alive."""
+    artifact_service = InMemoryArtifactService()
+    session = Session(
+        id="remote-timeout",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(artifact_service, session)
+
+    tool = ExecuteCodeTool(
+        tools=[],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+        timeout_seconds=1,
+    )
+    result = await tool.run_async(
+        args={"code": "import time\ntime.sleep(3600)\n"},
+        tool_context=_tool_context(ctx, call_id="remote-timeout-1"),
+    )
+    assert "exceeded timeout" in result["stderr"]
+
+    for _ in range(200):
+        if http_server.poll() is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert http_server.poll() is not None  # container exited despite the running block

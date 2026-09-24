@@ -32,7 +32,7 @@ import sys
 import traceback
 from typing import Any
 
-from adk_code_mode_sandbox import _rpc_client
+from adk_code_mode_sandbox import _interrupt, _rpc_client
 from adk_code_mode_sandbox._rpc_client import RpcClient
 from adk_code_mode_sandbox.protocol import (
     DoneFrame,
@@ -184,7 +184,8 @@ def _exec_into(code: str, globs: dict[str, Any]) -> int:
         traceback.print_exc()
         return 1
     try:
-        exec(compiled, globs)
+        with _interrupt.running():
+            exec(compiled, globs)
     except SystemExit as exc:
         code_val = exc.code
         if code_val is None:

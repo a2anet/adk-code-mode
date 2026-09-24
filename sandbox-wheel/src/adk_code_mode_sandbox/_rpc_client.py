@@ -19,8 +19,10 @@ import threading
 import uuid
 from typing import Any
 
+from adk_code_mode_sandbox import _interrupt
 from adk_code_mode_sandbox.protocol import (
     Frame,
+    InterruptFrame,
     ProtocolError,
     ToolCallFrame,
     ToolResultFrame,
@@ -105,6 +107,11 @@ class RpcClient:
                 if not line:
                     raise ProtocolError("control pipe closed by host")
                 frame = decode(line)
+                # Handled here, off the thread running the code, so a stop reaches
+                # a block that is busy or waiting on a tool call.
+                if isinstance(frame, InterruptFrame):
+                    _interrupt.interrupt(frame.message)
+                    continue
                 with self._state_changed:
                     if isinstance(frame, ToolResultFrame):
                         self._pending_results[frame.id] = frame

@@ -347,7 +347,7 @@ async def test_oversize_stdout_is_truncated_and_spilled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_terminates_hung_sandbox() -> None:
+async def test_timeout_stops_the_code_and_keeps_the_turn() -> None:
     artifact_service = InMemoryArtifactService()
     session = Session(
         id="s4",
@@ -359,11 +359,19 @@ async def test_timeout_terminates_hung_sandbox() -> None:
     )
     ctx = _make_invocation_context(artifact_service, session)
 
-    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), max_output_chars=500, timeout_seconds=1)
+    tool = ExecuteCodeTool(
+        tools=[], backend=FakeRuntime(), max_output_chars=10_000, timeout_seconds=1
+    )
 
-    result = await _run(tool, ctx, "while True:\n    pass\n", call_id="run-timeout")
-    assert result["stdout"] == ""
-    assert "Execution exceeded timeout of 1s" in result["stderr"]
+    result = await _run(
+        tool, ctx, "x = 41\nprint('before')\nwhile True:\n    pass\n", call_id="run-timeout"
+    )
+    assert result["stdout"] == "before\n"
+    assert "CodeTimeout: Your code ran for longer than 1s" in result["stderr"]
+    assert "Your code ran for longer than 1s, so it was stopped." in result["stderr"]
+
+    after = await _run(tool, ctx, "print(x + 1)\n", call_id="run-after-timeout")
+    assert after["stdout"] == "42\n"
 
 
 def test_a_block_is_bounded_without_the_host_saying_so() -> None:
@@ -385,7 +393,7 @@ async def test_timeout_does_not_wait_for_in_flight_tool_call() -> None:
     ctx = _make_invocation_context(artifact_service, session)
 
     tool = ExecuteCodeTool(
-        tools=[_SlowTool()], backend=FakeRuntime(), max_output_chars=500, timeout_seconds=1
+        tools=[_SlowTool()], backend=FakeRuntime(), max_output_chars=10_000, timeout_seconds=1
     )
 
     start = time.monotonic()
@@ -396,8 +404,8 @@ async def test_timeout_does_not_wait_for_in_flight_tool_call() -> None:
 
     assert elapsed < 1.8
     assert result["stdout"] == ""
-    assert "Execution exceeded timeout of 1s" in result["stderr"]
-    assert "Process exited with code" not in result["stderr"]
+    assert "CodeTimeout: Your code ran for longer than 1s" in result["stderr"]
+    assert "so it was stopped" in result["stderr"]
 
 
 @pytest.mark.asyncio

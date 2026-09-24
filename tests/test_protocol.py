@@ -60,6 +60,18 @@ def test_tool_result_error_roundtrip() -> None:
     assert decoded.error.message == "boom"
 
 
+def test_tool_result_http_error_roundtrip() -> None:
+    body = {"errors": {"scope.zones": ["The zones field is required."]}}
+    src = ToolResultFrame(
+        id="a1",
+        ok=False,
+        error=ToolErrorPayload(
+            type="HTTPStatusError", message="HTTP 400", status_code=400, body=body
+        ),
+    )
+    assert _roundtrip(src) == src
+
+
 def test_output_roundtrip() -> None:
     src = OutputFrame(stdout="hello\n", stderr="warn\n", exit_code=1)
     assert _roundtrip(src) == src

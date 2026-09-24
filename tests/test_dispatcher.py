@@ -7,15 +7,18 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.plugins.plugin_manager import PluginManager
 from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types as genai_types
 
+from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.tools import namespacing
-from adk_code_mode.tools.dispatcher import Dispatcher
+from adk_code_mode.tools.dispatcher import Dispatcher, HTTPStatusError
 from adk_code_mode.tools.normaliser import ResolvedTool
+from tests._rest_tool import VALIDATION_ERROR, rest_tool
 
 
 @dataclass
@@ -310,3 +313,79 @@ async def test_concurrent_nested_state_writes_are_deep_merged() -> None:
     )
 
     assert ctx.session.state["scratch"] == {"a": 1, "b": 2}
+
+
+async def test_rest_http_error_raises_http_status_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = await rest_tool(monkeypatch, 400, VALIDATION_ERROR)
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch(tool.name, {"name": "Weekend dinner"})
+    assert result.ok is False
+    assert result.error_type == "HTTPStatusError"
+    assert result.status_code == 400
+    assert result.body == VALIDATION_ERROR
+    assert result.error_message is not None
+    assert result.error_message.startswith(f"Tool `{tool.name}` returned HTTP 400: ")
+
+
+async def test_rest_http_error_raises_through_the_artifact_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = ToolResultArtifactTool(await rest_tool(monkeypatch, 404, {"detail": "Not found"}))
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch(tool.name, {"name": "Weekend dinner"})
+    assert result.ok is False
+    assert result.error_type == "HTTPStatusError"
+    assert result.status_code == 404
+
+
+async def test_rest_success_is_returned(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = await rest_tool(monkeypatch, 201, {"id": "rule-1"})
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch(tool.name, {"name": "Weekend dinner"})
+    assert result.ok is True
+    assert result.value == {"id": "rule-1"}
+
+
+async def test_on_error_callback_sees_the_http_status_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Exception] = []
+
+    def on_error(tool: BaseTool, args: dict[str, Any], tool_context: Any, error: Exception) -> Any:
+        seen.append(error)
+        return {"recovered": True}
+
+    tool = await rest_tool(monkeypatch, 400, VALIDATION_ERROR)
+    agent = _FakeAgent(canonical_on_tool_error_callbacks=[on_error])
+    d = Dispatcher(invocation_context=_make_ctx(agent), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch(tool.name, {"name": "Weekend dinner"})
+    assert result.ok is True
+    assert result.value == {"recovered": True}
+    assert isinstance(seen[0], HTTPStatusError)
+    assert seen[0].status_code == 400
+
+
+class _ResultTool(BaseTool):
+    def __init__(self, result: Any) -> None:
+        super().__init__(name="lookup", description="Returns a fixed result.")
+        self._result = result
+
+    async def run_async(self, *, args: dict[str, Any], tool_context: Any) -> Any:
+        return self._result
+
+
+async def test_mcp_error_result_raises() -> None:
+    tool = _ResultTool({"content": [{"type": "text", "text": "Venue not found"}], "isError": True})
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch("lookup", {})
+    assert result.ok is False
+    assert result.error_type == "McpToolError"
+    assert result.error_message == "Tool `lookup` failed: Venue not found"
+
+
+async def test_other_tools_returning_an_error_key_are_left_alone() -> None:
+    tool = _ResultTool({"error": "Nothing matched"})
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch("lookup", {})
+    assert result.ok is True
+    assert result.value == {"error": "Nothing matched"}

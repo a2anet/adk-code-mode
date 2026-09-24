@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 
 FrameKind = Literal[
@@ -81,6 +81,8 @@ class ToolErrorPayload:
     type: str
     message: str
     trace: str | None = None
+    status_code: int | None = None
+    body: Any = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,8 @@ def decode(line: bytes | str) -> Frame:
             type=str(err.get("type", "Error")),
             message=str(err.get("message", "")),
             trace=err.get("trace"),
+            status_code=err.get("status_code"),
+            body=err.get("body"),
         )
     valid_fields = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
     filtered = {k: v for k, v in obj.items() if k in valid_fields}

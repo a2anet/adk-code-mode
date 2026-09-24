@@ -132,11 +132,13 @@ _DESCRIPTION_WITH_METADATA = (
 )
 
 _DESCRIPTION_SUFFIX = (
-    " Print anything you want to see; only stdout/stderr are returned. "
-    "Variables and the working directory persist across calls within the same "
-    "turn and reset on the next turn — use `save_artifact` / `load_artifact` "
-    "(imported the same way) to persist across turns. Files created or changed "
-    "by the code are saved as artifacts automatically"
+    " Print function calls, variables, etc. to see output, only stdout/stderr are "
+    "returned. Variables and the working directory persist across calls within the "
+    "same turn and reset on the next turn — use `save_artifact` / `load_artifact` "
+    "(imported the same way) to persist across turns. Files created or changed by "
+    "the code are saved as artifacts automatically. A tool call whose API answers "
+    "with an HTTP error raises `HTTPStatusError` (with `status_code` and `body`), and "
+    "one that fails for any other reason raises `ToolError`; import both from `tools`."
 )
 
 
@@ -907,6 +909,8 @@ async def _handle_tool_call(
                 error=ToolErrorPayload(
                     type=result.error_type or "Error",
                     message=result.error_message or "",
+                    status_code=result.status_code,
+                    body=_json_safe(result.body),
                 ),
             )
         await session.send(reply)

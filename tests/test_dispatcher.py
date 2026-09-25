@@ -14,9 +14,10 @@ from google.adk.sessions.session import Session
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types as genai_types
 
+from adk_code_mode.tool_failures import HTTPStatusError
 from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.tools import namespacing
-from adk_code_mode.tools.dispatcher import Dispatcher, HTTPStatusError
+from adk_code_mode.tools.dispatcher import Dispatcher
 from adk_code_mode.tools.normaliser import ResolvedTool
 from tests._rest_tool import VALIDATION_ERROR, rest_tool
 
@@ -338,6 +339,20 @@ async def test_rest_http_error_raises_through_the_artifact_wrapper(
     assert result.status_code == 404
 
 
+async def test_large_rest_http_error_raises_through_the_artifact_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = ToolResultArtifactTool(
+        await rest_tool(monkeypatch, 400, VALIDATION_ERROR), large_result_threshold=1
+    )
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch(tool.name, {"name": "Weekend dinner"})
+    assert result.ok is False
+    assert result.error_type == "HTTPStatusError"
+    assert result.status_code == 400
+    assert result.body == VALIDATION_ERROR
+
+
 async def test_rest_success_is_returned(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = await rest_tool(monkeypatch, 201, {"id": "rule-1"})
     d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
@@ -376,6 +391,18 @@ class _ResultTool(BaseTool):
 
 async def test_mcp_error_result_raises() -> None:
     tool = _ResultTool({"content": [{"type": "text", "text": "Venue not found"}], "isError": True})
+    d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
+    result = await d.dispatch("lookup", {})
+    assert result.ok is False
+    assert result.error_type == "McpToolError"
+    assert result.error_message == "Tool `lookup` failed: Venue not found"
+
+
+async def test_large_mcp_error_raises_through_the_artifact_wrapper() -> None:
+    tool = ToolResultArtifactTool(
+        _ResultTool({"content": [{"type": "text", "text": "Venue not found"}], "isError": True}),
+        large_result_threshold=1,
+    )
     d = Dispatcher(invocation_context=_make_ctx(), registry=_registry(tool), execution_id="e1")  # type: ignore[arg-type]
     result = await d.dispatch("lookup", {})
     assert result.ok is False

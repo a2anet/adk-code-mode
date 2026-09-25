@@ -32,6 +32,8 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from adk_code_mode.tool_failures import raise_for_failed_result
+
 # Transport-neutral metadata stamped on saved tool-result artifacts. Downstream
 # consumers read these to decide whether/how to surface the artifact to the user.
 TOOL_RESULT_METADATA_KEY = "code_mode.tool_result"
@@ -131,6 +133,7 @@ class ToolResultArtifactTool(BaseTool):
             custom_metadata=metadata,
         )
 
+        raise_for_failed_result(self._wrapped, result)
         if len(data) > self._large_result_threshold:
             return {
                 "tool_result_artifact": filename,

@@ -27,9 +27,6 @@ class CodeTimeout(BaseException):
 
     message = ""
 
-    # Tracebacks print a builtin's bare name, so the code sees `CodeTimeout: ...`.
-    __module__ = "builtins"
-
     def __init__(self, *args: object) -> None:
         # The interpreter raises an asynchronous exception without arguments.
         super().__init__(*(args or (type(self).message,)))

@@ -30,6 +30,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
 from adk_code_mode import ExecuteCodeTool, RemoteBackend
+from tests._rest_tool import VALIDATION_ERROR, rest_tool
 
 _SANDBOX_SRC = Path(__file__).resolve().parent.parent / "sandbox-wheel" / "src"
 
@@ -153,6 +154,38 @@ async def test_remote_tool_call(http_server: subprocess.Popen[bytes]) -> None:
         args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-run-1")
     )
     assert "ECHO: {'echoed': 'hello from remote'}" in result["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_remote_http_error_raises_in_sandbox_code(
+    http_server: subprocess.Popen[bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session(
+        id="remote-s-http",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(InMemoryArtifactService(), session)
+
+    tool = ExecuteCodeTool(
+        tools=[await rest_tool(monkeypatch, 400, VALIDATION_ERROR)],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+    )
+    code = (
+        "from tools import HTTPStatusError, create_rule\n"
+        "try:\n"
+        "    create_rule(name='Weekend dinner')\n"
+        "except HTTPStatusError as e:\n"
+        "    print('STATUS:', e.status_code, e.body['errors'])\n"
+    )
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-run-http")
+    )
+    assert "STATUS: 400 {'scope.zones': ['The zones field is required.']}" in result["stdout"]
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,8 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
+from adk_code_mode.tool_failures import HTTPStatusError, raise_for_failed_result
+from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.tools.namespacing import Registry
 
 
@@ -54,6 +56,8 @@ class DispatchResult:
     value: Any = None
     error_type: str | None = None
     error_message: str | None = None
+    status_code: int | None = None
+    body: Any = None
 
 
 class UnsupportedToolActionError(RuntimeError):
@@ -148,6 +152,14 @@ class Dispatcher:
             )
         except asyncio.CancelledError:
             raise
+        except HTTPStatusError as exc:
+            return DispatchResult(
+                ok=False,
+                error_type="HTTPStatusError",
+                error_message=str(exc),
+                status_code=exc.status_code,
+                body=exc.body,
+            )
         except Exception as exc:
             return DispatchResult(
                 ok=False,
@@ -195,6 +207,8 @@ class Dispatcher:
         if response is None:
             try:
                 response = await tool.run_async(args=args, tool_context=tool_context)
+                inner = tool._wrapped if isinstance(tool, ToolResultArtifactTool) else tool
+                raise_for_failed_result(inner, response)
             except BaseException as tool_error:
                 override = await self._run_on_error(
                     invocation_context, tool, args, tool_context, tool_error

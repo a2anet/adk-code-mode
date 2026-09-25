@@ -12,6 +12,7 @@ Inspired by Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode/) and
 ## ✨ Features
 
 - **Call ADK tools from sandbox code** — imports against the `tools` package proxy back to the host and run through ADK's `before_tool` / `after_tool` / `on_error` callbacks and the plugin manager exactly as direct tool calls would.
+- **Failed tool calls raise** — a REST tool whose API answers with an HTTP error raises `HTTPStatusError` (with `status_code` and `body`), and any other failure, including an MCP tool that reports one, raises `ToolError`. ADK returns these as values for a model to read, but sandbox code reads return values, so it would otherwise carry on as if the call had worked.
 - **Bake any Python package into the image** — extend the published base image with anything the model's code needs to `import`, no runtime `pip install` required. The sandbox reports what it has installed, so the model is told about it automatically.
 - **Cross-turn persistence via ADK Artifacts** — `save_artifact` / `load_artifact` / `list_artifacts` are auto-injected and route through your configured `ArtifactService`. Files the code creates or changes are saved as artifacts automatically too.
 - **Tool results saved as artifacts** — on by default; every tool's result is persisted as a `code_mode.tool_result` artifact (with optional model-supplied name/description) so hosts can forward outputs and large results stay out of the prompt. Opt out with `save_tool_results_as_artifacts=False`.

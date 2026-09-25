@@ -38,6 +38,15 @@ class ToolError(RuntimeError):
         self.trace = trace
 
 
+class HTTPStatusError(Exception):
+    """Raised inside the sandbox when a tool's API answers with an HTTP error status."""
+
+    def __init__(self, message: str, status_code: int, body: Any) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
 class RpcClient:
     """Synchronous, thread-safe RPC client over the sandbox control pipe.
 
@@ -85,6 +94,8 @@ class RpcClient:
             err = frame.error
             if err is None:
                 raise ToolError("Error", "tool call failed without error payload")
+            if err.type == "HTTPStatusError" and err.status_code is not None:
+                raise HTTPStatusError(err.message, err.status_code, err.body)
             raise ToolError(err.type, err.message, err.trace)
 
     def _read_loop(self) -> None:
@@ -126,4 +137,4 @@ def call(name: str, args: dict[str, Any], timeout: float | None = None) -> Any:
     return get().call(name, args, timeout)
 
 
-__all__ = ["RpcClient", "ToolError", "call", "get", "install"]
+__all__ = ["HTTPStatusError", "RpcClient", "ToolError", "call", "get", "install"]

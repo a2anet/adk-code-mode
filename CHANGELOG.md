@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.6.1...adk-code-mode-v2.0.0) (2026-09-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* sandbox code that checked a tool result for an `error` key now gets an exception instead, and the sandbox image must be rebuilt for protocol version 3.
+
+### Features
+
+* raise when a tool call fails instead of returning the error ([#22](https://github.com/a2anet/adk-code-mode/issues/22)) ([489083d](https://github.com/a2anet/adk-code-mode/commit/489083d988cd7e958e94f3ef6acba6443284abd8))
+* stop a timed-out block without losing the turn's state ([#23](https://github.com/a2anet/adk-code-mode/issues/23)) ([4720156](https://github.com/a2anet/adk-code-mode/commit/47201568d0bb06527e32f850b7abb1b465e36920))
+
 ## [1.6.1](https://github.com/a2anet/adk-code-mode/compare/adk-code-mode-v1.6.0...adk-code-mode-v1.6.1) (2026-09-22)
 
 

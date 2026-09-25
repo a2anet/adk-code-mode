@@ -258,7 +258,7 @@ async def _run_one_block(
     _rpc_client.install(client)
     pump_task = asyncio.create_task(_pump_ws_to_reader(ws, bridge_reader))
     try:
-        stdout_text, stderr_text, exit_code = await loop.run_in_executor(
+        stdout_text, stderr_text, exit_code, background_work = await loop.run_in_executor(
             None, run_block, run_frame.code, globs
         )
     finally:
@@ -269,7 +269,9 @@ async def _run_one_block(
             pass
 
     # d-f. DoneFrame, OutputFrame, then the updated workspace tar (binary).
-    await ws.send(encode(DoneFrame(exit_code=exit_code)).decode("utf-8"))
+    await ws.send(
+        encode(DoneFrame(exit_code=exit_code, background_work=background_work)).decode("utf-8")
+    )
     await ws.send(
         encode(OutputFrame(stdout=stdout_text, stderr=stderr_text, exit_code=exit_code)).decode(
             "utf-8"

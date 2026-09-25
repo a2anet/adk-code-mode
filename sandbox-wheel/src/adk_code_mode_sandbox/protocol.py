@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 
 FrameKind = Literal[
@@ -34,6 +34,7 @@ FrameKind = Literal[
     "done",
     "output",
     "shutdown",
+    "interrupt",
 ]
 
 
@@ -110,6 +111,7 @@ class DoneFrame:
     """Sandbox → host. User code finished. Host drains stdout/stderr next."""
 
     exit_code: int = 0
+    background_work: bool = False
     kind: Literal["done"] = "done"
 
 
@@ -134,6 +136,14 @@ class ShutdownFrame:
     kind: Literal["shutdown"] = "shutdown"
 
 
+@dataclass(frozen=True)
+class InterruptFrame:
+    """Host → sandbox. Stop the running block, raising ``message`` in its code."""
+
+    message: str = ""
+    kind: Literal["interrupt"] = "interrupt"
+
+
 Frame = (
     ReadyFrame
     | RunFrame
@@ -143,6 +153,7 @@ Frame = (
     | DoneFrame
     | OutputFrame
     | ShutdownFrame
+    | InterruptFrame
 )
 
 
@@ -155,6 +166,7 @@ _KIND_TO_CLS: dict[str, type] = {
     "done": DoneFrame,
     "output": OutputFrame,
     "shutdown": ShutdownFrame,
+    "interrupt": InterruptFrame,
 }
 
 
@@ -225,6 +237,7 @@ __all__ = [
     "DoneFrame",
     "OutputFrame",
     "ShutdownFrame",
+    "InterruptFrame",
     "ProtocolError",
     "encode",
     "decode",

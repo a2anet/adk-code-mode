@@ -79,6 +79,9 @@ def test_output_roundtrip() -> None:
 
 def test_done_roundtrip() -> None:
     assert _roundtrip(DoneFrame(exit_code=0)) == DoneFrame(exit_code=0)
+    assert _roundtrip(DoneFrame(exit_code=1, background_work=True)) == DoneFrame(
+        exit_code=1, background_work=True
+    )
 
 
 def test_decode_rejects_unknown_kind() -> None:

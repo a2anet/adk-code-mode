@@ -148,7 +148,7 @@ class Dispatcher:
             return DispatchResult(
                 ok=False,
                 error_type="TimeoutError",
-                error_message=f"tool {tool.name!r} exceeded timeout of {effective_timeout}s",
+                error_message=f"Tool `{tool.name}` exceeded its {effective_timeout:g}s timeout",
             )
         except asyncio.CancelledError:
             raise

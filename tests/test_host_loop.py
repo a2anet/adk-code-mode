@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -57,13 +58,25 @@ class _StubHandle:
 
 async def test_host_loop_accepts_matching_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(), DoneFrame()])
-    await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
+    await _host_loop(
+        session=handle,  # type: ignore[arg-type]
+        dispatcher=None,  # type: ignore[arg-type]
+        backend_identity="img",
+        stop=asyncio.Event(),
+        timeout_seconds=60,
+    )
 
 
 async def test_host_loop_rejects_mismatched_protocol_version() -> None:
     handle = _StubHandle([ReadyFrame(protocol_version=PROTOCOL_VERSION + 1), DoneFrame()])
     with pytest.raises(ProtocolVersionMismatchError):
-        await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
+        await _host_loop(
+            session=handle,  # type: ignore[arg-type]
+            dispatcher=None,  # type: ignore[arg-type]
+            backend_identity="img",
+            stop=asyncio.Event(),
+            timeout_seconds=60,
+        )
 
 
 async def test_host_loop_records_sandbox_environment_from_ready_frame() -> None:
@@ -78,7 +91,13 @@ async def test_host_loop_records_sandbox_environment_from_ready_frame() -> None:
         ]
     )
 
-    await _host_loop(session=handle, dispatcher=None, backend_identity="img")  # type: ignore[arg-type]
+    await _host_loop(
+        session=handle,  # type: ignore[arg-type]
+        dispatcher=None,  # type: ignore[arg-type]
+        backend_identity="img",
+        stop=asyncio.Event(),
+        timeout_seconds=60,
+    )
 
     block = metadata.render(identity="img", namespaced=[], max_chars=10_000)
     assert "<python-version>3.13.2</python-version>" in block
@@ -152,6 +171,8 @@ async def test_handle_tool_call_sends_fallback_error_when_primary_send_fails() -
         handle,
         _FakeDispatcher(),  # type: ignore[arg-type]
         ToolCallFrame(id="call-1", name="tool", args={}),
+        asyncio.Event(),
+        60,
     )
 
     assert len(handle.sent) == 1
@@ -161,3 +182,44 @@ async def test_handle_tool_call_sends_fallback_error_when_primary_send_fails() -
     assert fallback.ok is False
     assert fallback.error is not None
     assert "failed to serialise or send tool result" in fallback.error.message
+
+
+class _SendHandle(_FailFirstSendHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = True
+
+
+class _SlowDispatcher:
+    async def dispatch(
+        self, name: str, args: dict[str, Any], timeout: float | None = None
+    ) -> DispatchResult:
+        await asyncio.sleep(3600)
+        return DispatchResult(ok=True, value={"ok": True})
+
+
+async def test_handle_tool_call_answers_a_call_still_running_when_stopped() -> None:
+    handle = _SendHandle()
+    stop = asyncio.Event()
+
+    call = asyncio.create_task(
+        _handle_tool_call(
+            handle,
+            _SlowDispatcher(),  # type: ignore[arg-type]
+            ToolCallFrame(id="call-1", name="rules.create_rule", args={}),
+            stop,
+            60,
+        )
+    )
+    await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(call, timeout=1)
+
+    [reply] = handle.sent
+    assert isinstance(reply, ToolResultFrame)
+    assert reply.ok is False
+    assert reply.error is not None
+    assert reply.error.type == "TimeoutError"
+    assert reply.error.message == (
+        "Tool `create_rule` was cancelled because your code ran for longer than 60s"
+    )

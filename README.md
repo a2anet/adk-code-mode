@@ -274,7 +274,7 @@ All settings are `ExecuteCodeTool` constructor arguments:
 | `max_code_mode_metadata_chars` | `50_000` | Budget for the whole rendered `<code-mode>` block, tags included. Oversized blocks degrade in tiers rather than disappearing — see [What the model sees](#what-the-model-sees). |
 | `max_output_chars` | `50_000` | Caps stdout/stderr handed back to the model. Overflow is saved as a session artifact at `code_mode/stdout/<call-id>.txt` and the model sees a head-and-tail view pointing to it. |
 | `max_code_chars` | `1_000_000` | Rejects oversized code payloads before starting a container. |
-| `timeout_seconds` | `60` | Caps overall execution time of one `execute_code` call, and with it every tool the block calls. `None` lifts the cap, leaving the platform request timeout (e.g. Cloud Run `--timeout`) as the only bound. |
+| `timeout_seconds` | `60` | Caps overall execution time of one `execute_code` call, and with it every tool the block calls. A block past the cap is stopped with its output so far, keeping the turn's variables and working directory. If it won't stop within a few seconds or leaves a worker thread or child process running, its sandbox is restarted and its output and state are lost. The model is told the cap. `None` lifts it, leaving the platform request timeout (e.g. Cloud Run `--timeout`) as the only bound. |
 | `per_tool_timeout_seconds` | `None` | Caps each individual tool call made from within the sandbox. |
 | `session_idle_timeout_seconds` | `600` | Idle reaper: closes a turn's container once it goes untouched this long. Backstop for turns that never call `release_invocation`. |
 

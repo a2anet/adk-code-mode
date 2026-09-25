@@ -69,6 +69,12 @@ def test_declaration_exposes_a_single_code_parameter() -> None:
     assert decl.parameters_json_schema["required"] == ["code"]
 
 
+def test_description_tells_the_model_the_timeout() -> None:
+    assert "Each call can run for up to 60s." in ExecuteCodeTool(backend=FakeRuntime()).description
+    unbounded = ExecuteCodeTool(backend=FakeRuntime(), timeout_seconds=None)
+    assert "Each call can run for up to" not in unbounded.description
+
+
 def test_tools_and_backend_properties_expose_the_configured_surface() -> None:
     schema_tool = _SchemaTool("ping", "Ping.")
     backend = FakeRuntime()

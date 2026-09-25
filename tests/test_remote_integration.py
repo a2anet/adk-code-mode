@@ -30,6 +30,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
 from adk_code_mode import ExecuteCodeTool, RemoteBackend
+from adk_code_mode import tool as tool_module
 from tests._rest_tool import VALIDATION_ERROR, rest_tool
 
 _SANDBOX_SRC = Path(__file__).resolve().parent.parent / "sandbox-wheel" / "src"
@@ -376,10 +377,87 @@ async def test_remote_close_shuts_the_container_down(
 
 
 @pytest.mark.asyncio
-async def test_remote_timed_out_block_shuts_the_container_down(
+async def test_remote_timed_out_block_keeps_its_state(
     http_server: subprocess.Popen[bytes],
 ) -> None:
-    """A block still running when the host gives up doesn't keep the server alive."""
+    """A block stopped at its timeout keeps the container, globals and output so far."""
+    session = Session(
+        id="remote-stop",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(InMemoryArtifactService(), session)
+
+    tool = ExecuteCodeTool(
+        tools=[],
+        backend=RemoteBackend(url=_server_url(http_server)),
+        max_output_chars=10_000,
+        timeout_seconds=1,
+    )
+    result = await tool.run_async(
+        args={"code": "x = 41\nprint('before')\nwhile True:\n    pass\n"},
+        tool_context=_tool_context(ctx, call_id="remote-stop-1"),
+    )
+    assert result["stdout"] == "before\n"
+    assert "CodeTimeout: Your code ran for longer than 1s" in result["stderr"]
+    assert "so it was stopped" in result["stderr"]
+
+    after = await tool.run_async(
+        args={"code": "print(x + 1)\n"},
+        tool_context=_tool_context(ctx, call_id="remote-stop-2"),
+    )
+    assert after["stdout"] == "42\n"
+    assert http_server.poll() is None
+
+
+@pytest.mark.asyncio
+async def test_remote_timed_out_block_restarts_with_a_worker_thread(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    session = Session(
+        id="remote-worker-timeout",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(InMemoryArtifactService(), session)
+    tool = ExecuteCodeTool(
+        tools=[], backend=RemoteBackend(url=_server_url(http_server)), timeout_seconds=1
+    )
+    code = (
+        "import threading, time\n"
+        "started = threading.Event()\n"
+        "def worker():\n"
+        "    started.set()\n"
+        "    time.sleep(5)\n"
+        "threading.Thread(target=worker, daemon=True).start()\n"
+        "started.wait()\n"
+        "while True: pass\n"
+    )
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-worker-timeout")
+    )
+    assert result["stdout"] == ""
+    assert "could not be stopped, so the sandbox was restarted" in result["stderr"]
+
+    for _ in range(200):
+        if http_server.poll() is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert http_server.poll() is not None
+
+
+@pytest.mark.asyncio
+async def test_remote_timed_out_block_shuts_the_container_down(
+    http_server: subprocess.Popen[bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block that won't stop when the host gives up doesn't keep the server alive."""
+    monkeypatch.setattr(tool_module, "_STOP_GRACE_SECONDS", 0.5)
     artifact_service = InMemoryArtifactService()
     session = Session(
         id="remote-timeout",
@@ -401,7 +479,7 @@ async def test_remote_timed_out_block_shuts_the_container_down(
         args={"code": "import time\ntime.sleep(3600)\n"},
         tool_context=_tool_context(ctx, call_id="remote-timeout-1"),
     )
-    assert "exceeded timeout" in result["stderr"]
+    assert "could not be stopped, so the sandbox was restarted" in result["stderr"]
 
     for _ in range(200):
         if http_server.poll() is not None:

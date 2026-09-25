@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import datetime as dt
 import enum
@@ -55,6 +56,7 @@ from adk_code_mode.runtime.protocol import (
     PROTOCOL_VERSION,
     DoneFrame,
     Frame,
+    InterruptFrame,
     LogFrame,
     ReadyFrame,
     RunFrame,
@@ -64,7 +66,7 @@ from adk_code_mode.runtime.protocol import (
 )
 from adk_code_mode.tool_result_artifacts import ToolResultArtifactTool
 from adk_code_mode.tools import namespacing, normaliser, stubs
-from adk_code_mode.tools.dispatcher import Dispatcher
+from adk_code_mode.tools.dispatcher import DispatchResult, Dispatcher
 from adk_code_mode.workspace.files import hash_file, walk_workspace
 
 if TYPE_CHECKING:
@@ -101,6 +103,8 @@ logger = logging.getLogger("adk_code_mode.tool")
 # strands its container (the idle reaper skips turns still in use) and holds up
 # whatever is waiting on the turn. Hosts that genuinely need longer pass their own.
 DEFAULT_TIMEOUT_SECONDS = 60
+# How long a block past its timeout gets to stop before its sandbox is restarted.
+_STOP_GRACE_SECONDS = 5.0
 
 _REAPER_MAX_POLL_SECONDS = 30.0
 
@@ -142,10 +146,11 @@ _DESCRIPTION_SUFFIX = (
 )
 
 
-def _build_description(*, append_metadata: bool) -> str:
+def _build_description(*, append_metadata: bool, timeout_seconds: int | None) -> str:
     """Build the tool description for this tool's configured surface."""
     pointer = _DESCRIPTION_WITH_METADATA if append_metadata else metadata.DISCOVER_TOOLS
-    return f"{_DESCRIPTION_PREFIX}{pointer}{_DESCRIPTION_SUFFIX}"
+    limit = f" Each call can run for up to {timeout_seconds}s." if timeout_seconds else ""
+    return f"{_DESCRIPTION_PREFIX}{pointer}{_DESCRIPTION_SUFFIX}{limit}"
 
 
 ArtifactsSavedCallback = Callable[[InvocationContext, dict[str, int]], Awaitable[None]]
@@ -248,9 +253,12 @@ class ExecuteCodeTool(BaseTool):
           max_code_chars: Rejects oversized code payloads before starting a
             container.
           timeout_seconds: Caps overall execution time of one ``execute_code``
-            call, and with it every tool the block calls. ``None`` lifts the cap,
-            which leaves a runaway block stranding its container until the idle
-            reaper takes it.
+            call, and with it every tool the block calls. A block past the cap
+            is stopped with its output so far, keeping the turn's variables and
+            working directory; one that won't stop within a few seconds or
+            leaves worker threads or child processes running has its sandbox
+            restarted. ``None`` lifts the cap, which leaves a runaway block
+            stranding its container until the idle reaper takes it.
           per_tool_timeout_seconds: Caps each individual tool call made from
             within the sandbox.
           session_idle_timeout_seconds: Idle reaper: closes a turn's container
@@ -265,7 +273,8 @@ class ExecuteCodeTool(BaseTool):
         super().__init__(
             name="execute_code",
             description=_build_description(
-                append_metadata=append_code_mode_metadata_to_system_instruction
+                append_metadata=append_code_mode_metadata_to_system_instruction,
+                timeout_seconds=timeout_seconds,
             ),
         )
 
@@ -399,11 +408,11 @@ class ExecuteCodeTool(BaseTool):
         turn.mark_in_use()
         try:
             try:
-                turn, result, dispatcher = await self._run_block_reconnecting(
+                turn, result, dispatcher, stopped = await self._run_block_reconnecting(
                     invocation_id, turn, prepared, invocation_context, code, execution_id
                 )
             except asyncio.TimeoutError:
-                return _timeout_result(self.timeout_seconds)
+                return _not_stopped_result(self.timeout_seconds)
             except _BlockConnectionLost as exc:
                 return _connection_lost_result(exc.state)
 
@@ -411,6 +420,8 @@ class ExecuteCodeTool(BaseTool):
             await self._fire_artifacts_saved(invocation_context, dispatcher.artifact_delta)
 
             stderr = _stderr_with_exit_code(result.stderr, result.exit_code)
+            if stopped:
+                stderr = f"{stderr}\n{_stopped_message(self.timeout_seconds)}"
             stdout_res, stderr_res = await asyncio.gather(
                 truncate(
                     result.stdout,
@@ -521,12 +532,14 @@ class ExecuteCodeTool(BaseTool):
         invocation_context: InvocationContext,
         code: str,
         execution_id: str,
-    ) -> tuple[SandboxResult, Dispatcher]:
+    ) -> tuple[SandboxResult, Dispatcher, bool]:
         """Run one code block on ``turn``'s session, bounded by ``timeout_seconds``.
 
-        Drives the per-block contract. Raises ``asyncio.TimeoutError`` on
-        timeout and ``_BlockConnectionLost`` if the connection dropped
-        mid-block.
+        Drives the per-block contract. A block past the timeout is sent an
+        ``InterruptFrame`` and comes back with ``stopped`` set, its turn intact.
+        Raises ``asyncio.TimeoutError`` if it doesn't stop within
+        ``_STOP_GRACE_SECONDS`` and ``_BlockConnectionLost`` if the connection
+        dropped mid-block.
         """
         dispatcher = Dispatcher(
             invocation_context=invocation_context,
@@ -534,16 +547,42 @@ class ExecuteCodeTool(BaseTool):
             execution_id=execution_id,
             per_tool_timeout_seconds=self._per_tool_timeout_seconds,
         )
-        result = await asyncio.wait_for(
+        stop = asyncio.Event()
+        block = asyncio.create_task(
             _run_block(
                 session=turn.session,
                 dispatcher=dispatcher,
                 code=code,
                 backend_identity=self._backend_identity,
-            ),
-            timeout=self.timeout_seconds if self.timeout_seconds else None,
+                stop=stop,
+                timeout_seconds=self.timeout_seconds,
+            )
         )
-        return result, dispatcher
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(block),
+                timeout=self.timeout_seconds if self.timeout_seconds else None,
+            )
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            block.cancel()
+            raise
+        else:
+            return result, dispatcher, False
+
+        # Interrupt first: frames arrive in order, so code waiting on a tool call
+        # wakes to the stop rather than to the call's cancellation. A dropped
+        # connection surfaces from the block itself.
+        with contextlib.suppress(SandboxConnectionError):
+            await turn.session.send(
+                InterruptFrame(message=f"Your code {_ran_too_long(self.timeout_seconds)}")
+            )
+        stop.set()
+        result = await asyncio.wait_for(block, timeout=_STOP_GRACE_SECONDS)
+        if result.background_work:
+            raise asyncio.TimeoutError
+        return result, dispatcher, True
 
     async def _run_block_reconnecting(
         self,
@@ -553,7 +592,7 @@ class ExecuteCodeTool(BaseTool):
         invocation_context: InvocationContext,
         code: str,
         execution_id: str,
-    ) -> tuple["_TurnSession", SandboxResult, Dispatcher]:
+    ) -> tuple["_TurnSession", SandboxResult, Dispatcher, bool]:
         """Run the block, reconnecting once only if the code never reached the sandbox.
 
         Returns the (possibly reconnected) turn plus its result. On a terminal
@@ -565,10 +604,10 @@ class ExecuteCodeTool(BaseTool):
         """
         for attempt in range(_MAX_BLOCK_ATTEMPTS):
             try:
-                result, dispatcher = await self._run_attempt(
+                result, dispatcher, stopped = await self._run_attempt(
                     turn, invocation_context, code, execution_id
                 )
-                return turn, result, dispatcher
+                return turn, result, dispatcher, stopped
             except asyncio.TimeoutError:
                 await self._discard_turn(invocation_id, turn)
                 raise
@@ -753,13 +792,27 @@ class _TurnSession:
         self.workspace.cleanup()
 
 
-def _timeout_result(timeout_seconds: int | None) -> dict[str, Any]:
+def _ran_too_long(timeout_seconds: int | None) -> str:
+    return f"ran for longer than {timeout_seconds}s"
+
+
+def _stopped_message(timeout_seconds: int | None) -> str:
+    return (
+        f"Your code {_ran_too_long(timeout_seconds)}, so it was stopped. The output above is what "
+        "it printed before it stopped. Variables and the working directory persist as "
+        "usual. Do not blindly re-run it — check whether its effects took place first."
+    )
+
+
+def _not_stopped_result(timeout_seconds: int | None) -> dict[str, Any]:
     return {
         "stdout": "",
         "stderr": (
-            f"Execution exceeded timeout of {timeout_seconds}s and was terminated."
-            if timeout_seconds is not None
-            else "Execution timed out and was terminated."
+            f"Your code {_ran_too_long(timeout_seconds)} and could not be stopped, so the "
+            "sandbox was "
+            "restarted. Any output is lost, and variables and the working directory have "
+            "been reset. Do not blindly re-run it — check whether its effects took place "
+            "first."
         ),
         "output_files": [],
     }
@@ -801,6 +854,8 @@ async def _run_block(
     dispatcher: Dispatcher,
     code: str,
     backend_identity: str,
+    stop: asyncio.Event,
+    timeout_seconds: int | None,
 ) -> SandboxResult:
     """Run one code block on an already-open session (no connect, no shutdown).
 
@@ -815,35 +870,42 @@ async def _run_block(
     (``UNKNOWN``).
     """
     code_sent = False
-    done_exit_code: int | None = None
+    done: DoneFrame | None = None
     try:
         await session.begin_block([])
         host_loop = asyncio.create_task(
-            _host_loop(session=session, dispatcher=dispatcher, backend_identity=backend_identity)
+            _host_loop(
+                session=session,
+                dispatcher=dispatcher,
+                backend_identity=backend_identity,
+                stop=stop,
+                timeout_seconds=timeout_seconds,
+            )
         )
         try:
             await session.send(RunFrame(code=code))
             code_sent = True
-            done_exit_code = await host_loop
+            done = await host_loop
         finally:
             if not host_loop.done():
                 host_loop.cancel()
                 await asyncio.gather(host_loop, return_exceptions=True)
         result = await session.wait()
     except SandboxConnectionError as exc:
-        if done_exit_code is not None:
+        if done is not None:
             state = _BlockRunState.RAN
         elif code_sent:
             state = _BlockRunState.UNKNOWN
         else:
             state = _BlockRunState.NOT_RUN
         raise _BlockConnectionLost(state) from exc
-    if done_exit_code is None:
+    if done is None:
         return result
     return SandboxResult(
         stdout=result.stdout,
         stderr=result.stderr,
-        exit_code=done_exit_code,
+        exit_code=done.exit_code,
+        background_work=done.background_work,
     )
 
 
@@ -852,13 +914,15 @@ async def _host_loop(
     session: SandboxSession,
     dispatcher: Dispatcher,
     backend_identity: str,
-) -> int | None:
+    stop: asyncio.Event,
+    timeout_seconds: int | None,
+) -> DoneFrame | None:
     """Consume frames from the sandbox until a ``DoneFrame`` arrives.
 
     ``tool_call`` frames are dispatched concurrently as background tasks so a
-    slow tool doesn't block other calls. The opening ``ReadyFrame`` is also
-    where the sandbox reports what it has installed, cached for the next
-    system instruction.
+    slow tool doesn't block other calls, and each is cancelled once ``stop`` is
+    set. The opening ``ReadyFrame`` is also where the sandbox reports what it
+    has installed, cached for the next system instruction.
     """
     pending: list[asyncio.Task[Any]] = []
     frames = session.frames()
@@ -873,9 +937,13 @@ async def _host_loop(
                 metadata.record(backend_identity, frame)
                 continue
             if isinstance(frame, DoneFrame):
-                return frame.exit_code
+                return frame
             if isinstance(frame, ToolCallFrame):
-                pending.append(asyncio.create_task(_handle_tool_call(session, dispatcher, frame)))
+                pending.append(
+                    asyncio.create_task(
+                        _handle_tool_call(session, dispatcher, frame, stop, timeout_seconds)
+                    )
+                )
                 continue
             if isinstance(frame, LogFrame):
                 logger.log(
@@ -897,8 +965,34 @@ async def _handle_tool_call(
     session: SandboxSession,
     dispatcher: Dispatcher,
     frame: ToolCallFrame,
+    stop: asyncio.Event,
+    timeout_seconds: int | None,
 ) -> None:
-    result = await dispatcher.dispatch(frame.name, frame.args, timeout=frame.timeout)
+    dispatch = asyncio.ensure_future(
+        dispatcher.dispatch(frame.name, frame.args, timeout=frame.timeout)
+    )
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({dispatch, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+        if not dispatch.done():
+            dispatch.cancel()
+            await asyncio.gather(dispatch, return_exceptions=True)
+    # A call still running when its block is stopped is answered so the code
+    # waiting on it wakes up and sees the stop.
+    if dispatch.cancelled():
+        tool_name = frame.name.rsplit(".", 1)[-1]
+        result = DispatchResult(
+            ok=False,
+            error_type="TimeoutError",
+            error_message=(
+                f"Tool `{tool_name}` was cancelled because your code "
+                f"{_ran_too_long(timeout_seconds)}"
+            ),
+        )
+    else:
+        result = dispatch.result()
     try:
         if result.ok:
             reply: Frame = ToolResultFrame(id=frame.id, ok=True, value=_json_safe(result.value))

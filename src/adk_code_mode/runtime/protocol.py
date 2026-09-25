@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 4
 
 
 FrameKind = Literal[

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -372,6 +375,78 @@ async def test_timeout_stops_the_code_and_keeps_the_turn() -> None:
 
     after = await _run(tool, ctx, "print(x + 1)\n", call_id="run-after-timeout")
     assert after["stdout"] == "42\n"
+
+
+@pytest.mark.asyncio
+async def test_timeout_restarts_the_turn_when_a_worker_thread_remains() -> None:
+    session = Session(
+        id="s4-worker",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_invocation_context(InMemoryArtifactService(), session)
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), timeout_seconds=1)
+
+    code = (
+        "import threading, time\n"
+        "value = 41\n"
+        "started = threading.Event()\n"
+        "def worker():\n"
+        "    started.set()\n"
+        "    time.sleep(5)\n"
+        "    value = 99\n"
+        "threading.Thread(target=worker, daemon=True).start()\n"
+        "started.wait()\n"
+        "while True: pass\n"
+    )
+    result = await _run(tool, ctx, code, call_id="run-worker-timeout")
+    assert result["stdout"] == ""
+    assert "could not be stopped, so the sandbox was restarted" in result["stderr"]
+
+    after = await _run(tool, ctx, "print('value' in globals())\n", call_id="run-after-worker")
+    assert after["stdout"] == "False\n"
+    await tool.release_invocation(ctx.invocation_id)
+
+
+@pytest.mark.asyncio
+async def test_timeout_restarts_the_turn_when_a_child_process_remains(tmp_path: Path) -> None:
+    session = Session(
+        id="s4-child",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_invocation_context(InMemoryArtifactService(), session)
+    tool = ExecuteCodeTool(tools=[], backend=FakeRuntime(), timeout_seconds=1)
+    pid_file = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL)\n"
+        f"with open({str(pid_file)!r}, 'w') as file:\n"
+        "    file.write(str(child.pid))\n"
+        "while True: pass\n"
+    )
+    try:
+        result = await _run(tool, ctx, code, call_id="run-child-timeout")
+        assert result["stdout"] == ""
+        assert "could not be stopped, so the sandbox was restarted" in result["stderr"]
+
+        after = await _run(tool, ctx, "print('child' in globals())\n", call_id="run-after-child")
+        assert after["stdout"] == "False\n"
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        await tool.release_invocation(ctx.invocation_id)
 
 
 def test_a_block_is_bounded_without_the_host_saying_so() -> None:

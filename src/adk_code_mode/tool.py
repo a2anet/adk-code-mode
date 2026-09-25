@@ -255,9 +255,10 @@ class ExecuteCodeTool(BaseTool):
           timeout_seconds: Caps overall execution time of one ``execute_code``
             call, and with it every tool the block calls. A block past the cap
             is stopped with its output so far, keeping the turn's variables and
-            working directory; one that won't stop within a few seconds has its
-            sandbox restarted. ``None`` lifts the cap, which leaves a runaway
-            block stranding its container until the idle reaper takes it.
+            working directory; one that won't stop within a few seconds or
+            leaves worker threads or child processes running has its sandbox
+            restarted. ``None`` lifts the cap, which leaves a runaway block
+            stranding its container until the idle reaper takes it.
           per_tool_timeout_seconds: Caps each individual tool call made from
             within the sandbox.
           session_idle_timeout_seconds: Idle reaper: closes a turn's container
@@ -579,6 +580,8 @@ class ExecuteCodeTool(BaseTool):
             )
         stop.set()
         result = await asyncio.wait_for(block, timeout=_STOP_GRACE_SECONDS)
+        if result.background_work:
+            raise asyncio.TimeoutError
         return result, dispatcher, True
 
     async def _run_block_reconnecting(
@@ -867,7 +870,7 @@ async def _run_block(
     (``UNKNOWN``).
     """
     code_sent = False
-    done_exit_code: int | None = None
+    done: DoneFrame | None = None
     try:
         await session.begin_block([])
         host_loop = asyncio.create_task(
@@ -882,26 +885,27 @@ async def _run_block(
         try:
             await session.send(RunFrame(code=code))
             code_sent = True
-            done_exit_code = await host_loop
+            done = await host_loop
         finally:
             if not host_loop.done():
                 host_loop.cancel()
                 await asyncio.gather(host_loop, return_exceptions=True)
         result = await session.wait()
     except SandboxConnectionError as exc:
-        if done_exit_code is not None:
+        if done is not None:
             state = _BlockRunState.RAN
         elif code_sent:
             state = _BlockRunState.UNKNOWN
         else:
             state = _BlockRunState.NOT_RUN
         raise _BlockConnectionLost(state) from exc
-    if done_exit_code is None:
+    if done is None:
         return result
     return SandboxResult(
         stdout=result.stdout,
         stderr=result.stderr,
-        exit_code=done_exit_code,
+        exit_code=done.exit_code,
+        background_work=done.background_work,
     )
 
 
@@ -912,7 +916,7 @@ async def _host_loop(
     backend_identity: str,
     stop: asyncio.Event,
     timeout_seconds: int | None,
-) -> int | None:
+) -> DoneFrame | None:
     """Consume frames from the sandbox until a ``DoneFrame`` arrives.
 
     ``tool_call`` frames are dispatched concurrently as background tasks so a
@@ -933,7 +937,7 @@ async def _host_loop(
                 metadata.record(backend_identity, frame)
                 continue
             if isinstance(frame, DoneFrame):
-                return frame.exit_code
+                return frame
             if isinstance(frame, ToolCallFrame):
                 pending.append(
                     asyncio.create_task(

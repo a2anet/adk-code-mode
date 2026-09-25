@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 
 FrameKind = Literal[
@@ -111,6 +111,7 @@ class DoneFrame:
     """Sandbox → host. User code finished. Host drains stdout/stderr next."""
 
     exit_code: int = 0
+    background_work: bool = False
     kind: Literal["done"] = "done"
 
 

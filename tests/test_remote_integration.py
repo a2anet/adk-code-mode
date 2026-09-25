@@ -414,6 +414,45 @@ async def test_remote_timed_out_block_keeps_its_state(
 
 
 @pytest.mark.asyncio
+async def test_remote_timed_out_block_restarts_with_a_worker_thread(
+    http_server: subprocess.Popen[bytes],
+) -> None:
+    session = Session(
+        id="remote-worker-timeout",
+        app_name="test-app",
+        user_id="u1",
+        state={},
+        events=[],
+        last_update_time=0.0,
+    )
+    ctx = _make_ctx(InMemoryArtifactService(), session)
+    tool = ExecuteCodeTool(
+        tools=[], backend=RemoteBackend(url=_server_url(http_server)), timeout_seconds=1
+    )
+    code = (
+        "import threading, time\n"
+        "started = threading.Event()\n"
+        "def worker():\n"
+        "    started.set()\n"
+        "    time.sleep(5)\n"
+        "threading.Thread(target=worker, daemon=True).start()\n"
+        "started.wait()\n"
+        "while True: pass\n"
+    )
+    result = await tool.run_async(
+        args={"code": code}, tool_context=_tool_context(ctx, call_id="remote-worker-timeout")
+    )
+    assert result["stdout"] == ""
+    assert "could not be stopped, so the sandbox was restarted" in result["stderr"]
+
+    for _ in range(200):
+        if http_server.poll() is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert http_server.poll() is not None
+
+
+@pytest.mark.asyncio
 async def test_remote_timed_out_block_shuts_the_container_down(
     http_server: subprocess.Popen[bytes], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -28,7 +28,9 @@ import io
 import os
 import platform
 import socket
+import subprocess
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -200,7 +202,54 @@ def _exec_into(code: str, globs: dict[str, Any]) -> int:
     return 0
 
 
-def run_block(code: str, globs: dict[str, Any]) -> tuple[str, str, int]:
+def _has_linux_child_processes(task_dir: str = "/proc/self/task") -> bool:
+    """Check each Linux thread for child processes still running."""
+    checked = False
+    try:
+        with os.scandir(task_dir) as tasks:
+            for task in tasks:
+                try:
+                    with open(f"{task.path}/children") as children:
+                        checked = True
+                        if children.read().strip():
+                            return True
+                except FileNotFoundError:
+                    continue
+    except OSError:
+        return True
+    return not checked
+
+
+def _has_child_processes() -> bool:
+    """Check whether user code left a child process running."""
+    if sys.platform == "linux":
+        return _has_linux_child_processes()
+    try:
+        probe = subprocess.Popen(["ps", "-axo", "pid=,ppid="], stdout=subprocess.PIPE, text=True)
+        try:
+            output, _ = probe.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            probe.kill()
+            probe.wait()
+            return True
+    except OSError:
+        return True
+    if probe.returncode != 0:
+        return True
+    return any(
+        int(pid) != probe.pid and int(ppid) == os.getpid()
+        for pid, ppid in (line.split() for line in output.splitlines())
+    )
+
+
+def _has_background_work() -> bool:
+    """Check whether code remains active outside the interrupted execution thread."""
+    reader_thread = _rpc_client.get()._reader_thread
+    trusted = {threading.current_thread(), threading.main_thread(), reader_thread}
+    return any(thread not in trusted for thread in threading.enumerate()) or _has_child_processes()
+
+
+def run_block(code: str, globs: dict[str, Any]) -> tuple[str, str, int, bool]:
     """Run one code block with its stdout/stderr captured.
 
     Redirects ``sys.stdout`` / ``sys.stderr`` to in-memory buffers for the
@@ -217,7 +266,7 @@ def run_block(code: str, globs: dict[str, Any]) -> tuple[str, str, int]:
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
-    return capture_out.getvalue(), capture_err.getvalue(), exit_code
+    return capture_out.getvalue(), capture_err.getvalue(), exit_code, _has_background_work()
 
 
 def main() -> int:
@@ -247,8 +296,8 @@ def main() -> int:
         if isinstance(frame, ShutdownFrame):
             return 0
         if isinstance(frame, RunFrame):
-            stdout_text, stderr_text, exit_code = run_block(frame.code, globs)
-            client.send(DoneFrame(exit_code=exit_code))
+            stdout_text, stderr_text, exit_code, background_work = run_block(frame.code, globs)
+            client.send(DoneFrame(exit_code=exit_code, background_work=background_work))
             client.send(OutputFrame(stdout=stdout_text, stderr=stderr_text, exit_code=exit_code))
             continue
         # Any other frame kind is a host protocol error; keep going but log.
